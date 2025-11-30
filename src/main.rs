@@ -73,12 +73,12 @@ async fn http_server_task(stack: &'static Stack<'static>) {
     Timer::after(Duration::from_millis(500)).await;
     info!("Starting HTTP server on 192.168.4.1:80");
 
-    let mut rx_buffer = [0; 8192];
-    let mut tx_buffer = [0; 8192];
+    let mut rx_buffer = [0; 16384];
+    let mut tx_buffer = [0; 16384];
 
     loop {
         let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
-        socket.set_timeout(Some(Duration::from_secs(10)));
+        socket.set_timeout(Some(Duration::from_secs(30)));
 
         info!("Listening on TCP:80...");
         if let Err(e) = socket.accept(80).await {
@@ -117,7 +117,7 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let data = EC800K_DATA.lock().await;
 
             // Build response string
-            let mut response_str = heapless::String::<2048>::new();
+            let mut response_str = heapless::String::<4096>::new();
             use core::fmt::Write as _;
             let _ = core::write!(
                 &mut response_str,
@@ -145,7 +145,8 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
     }
 
     socket.flush().await?;
-    Timer::after(Duration::from_millis(100)).await;
+    socket.close();
+    Timer::after(Duration::from_millis(10)).await;
 
     Ok(())
 }
@@ -283,10 +284,10 @@ async fn main(spawner: Spawner) {
     // GP0 = TX (to EC800K RX)
     // GP1 = RX (from EC800K TX)
 
-    static UART_TX_BUF: StaticCell<[u8; 1024]> = StaticCell::new();
-    static UART_RX_BUF: StaticCell<[u8; 1024]> = StaticCell::new();
-    let uart_tx_buf = UART_TX_BUF.init([0u8; 1024]);
-    let uart_rx_buf = UART_RX_BUF.init([0u8; 1024]);
+    static UART_TX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
+    static UART_RX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
+    let uart_tx_buf = UART_TX_BUF.init([0u8; 2048]);
+    let uart_rx_buf = UART_RX_BUF.init([0u8; 2048]);
 
     let mut uart_config = UartConfig::default();
     // Manual testing: Try 115200, 230400, 460800, 921600
@@ -318,11 +319,11 @@ async fn main(spawner: Spawner) {
     let seed = 0x0123_4567_89ab_cdef; // Random seed for network stack
 
     static STACK: StaticCell<Stack<'static>> = StaticCell::new();
-    static RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
+    static RESOURCES: StaticCell<StackResources<16>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         net_device,
         config,
-        RESOURCES.init(StackResources::<8>::new()),
+        RESOURCES.init(StackResources::<16>::new()),
         seed,
     );
     let stack = STACK.init(stack);
