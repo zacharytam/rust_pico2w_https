@@ -110,20 +110,9 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             info!("Method: {}, Path: {}", method, path);
 
             // TODO: Forward to EC800K via AT commands
-            // For now, send a diagnostic response
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
-                <html><body>\
-                <h1>Pico 2W Gateway</h1>\
-                <p>Connected via EC800K (China Telecom)</p>\
-                <p>Request: {} {}</p>\
-                <p>Note: Internet routing not yet implemented. EC800K is initializing with ctnet APN.</p>\
-                </body></html>\r\n",
-                method, path
-            );
-            let response_bytes = response.as_bytes();
-            let len = response_bytes.len().min(512);
-            socket.write_all(&response_bytes[..len]).await?;
+            // For now, send a simple response
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Pico 2W Gateway</h1><p>Connected via EC800K (China Telecom)</p><p>Internet routing not yet implemented</p></body></html>\r\n";
+            socket.write_all(response.as_bytes()).await?;
         }
     }
 
@@ -140,7 +129,7 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
     Timer::after(Duration::from_secs(2)).await;
 
     // Initialize EC800K modem
-    let init_commands = [
+    let init_commands: &[&[u8]] = &[
         b"AT\r\n",                            // Test AT
         b"ATE0\r\n",                          // Disable echo
         b"AT+CPIN?\r\n",                      // Check SIM
@@ -151,9 +140,9 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
         b"AT+QIACT?\r\n",                     // Query IP address
     ];
 
-    for cmd in init_commands.iter() {
-        info!("Sending: {}", core::str::from_utf8(cmd).unwrap_or(""));
-        let _ = tx.write_all(cmd).await;
+    for cmd in init_commands {
+        info!("Sending: {}", core::str::from_utf8(*cmd).unwrap_or(""));
+        let _ = tx.write_all(*cmd).await;
         Timer::after(Duration::from_secs(2)).await;
 
         // Read response
