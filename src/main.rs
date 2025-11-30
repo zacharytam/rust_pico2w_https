@@ -53,6 +53,24 @@ async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'sta
 
 #[embassy_executor::task]
 async fn http_server_task(stack: &'static Stack<'static>) {
+    // Wait for network to be ready
+    loop {
+        if stack.is_link_up() {
+            info!("Network link is up!");
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+
+    info!("Waiting for IP configuration...");
+    loop {
+        if let Some(config) = stack.config_v4() {
+            info!("IP address: {:?}", config.address);
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+
     let mut rx_buffer = [0; 4096];
     let mut tx_buffer = [0; 4096];
 
@@ -92,9 +110,20 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             info!("Method: {}, Path: {}", method, path);
 
             // TODO: Forward to EC800K via AT commands
-            // For now, send a simple response
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Pico 2W Gateway</h1><p>Connected via EC800K</p></body></html>\r\n";
-            socket.write_all(response.as_bytes()).await?;
+            // For now, send a diagnostic response
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+                <html><body>\
+                <h1>Pico 2W Gateway</h1>\
+                <p>Connected via EC800K (China Telecom)</p>\
+                <p>Request: {} {}</p>\
+                <p>Note: Internet routing not yet implemented. EC800K is initializing with ctnet APN.</p>\
+                </body></html>\r\n",
+                method, path
+            );
+            let response_bytes = response.as_bytes();
+            let len = response_bytes.len().min(512);
+            socket.write_all(&response_bytes[..len]).await?;
         }
     }
 
@@ -106,20 +135,56 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
 
 #[embassy_executor::task]
 async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
-    info!("UART task started");
+    info!("UART task started - Initializing EC800K for China Telecom");
 
-    // Test EC800K communication
-    let test_cmd = b"AT\r\n";
-    let _ = tx.write_all(test_cmd).await;
-    info!("Sent AT command to EC800K");
+    Timer::after(Duration::from_secs(2)).await;
 
-    // Read responses
-    let mut buf = [0u8; 256];
+    // Initialize EC800K modem
+    let init_commands = [
+        b"AT\r\n",                            // Test AT
+        b"ATE0\r\n",                          // Disable echo
+        b"AT+CPIN?\r\n",                      // Check SIM
+        b"AT+CREG?\r\n",                      // Check network registration
+        b"AT+CGATT=1\r\n",                    // Attach to GPRS
+        b"AT+CGDCONT=1,\"IP\",\"ctnet\"\r\n", // China Telecom APN
+        b"AT+QIACT=1\r\n",                    // Activate PDP context
+        b"AT+QIACT?\r\n",                     // Query IP address
+    ];
+
+    for cmd in init_commands.iter() {
+        info!("Sending: {}", core::str::from_utf8(cmd).unwrap_or(""));
+        let _ = tx.write_all(cmd).await;
+        Timer::after(Duration::from_secs(2)).await;
+
+        // Read response
+        let mut buf = [0u8; 512];
+        let mut total_read = 0;
+        for _ in 0..10 {
+            match rx.read(&mut buf[total_read..]).await {
+                Ok(n) if n > 0 => {
+                    total_read += n;
+                    if let Ok(s) = core::str::from_utf8(&buf[..total_read]) {
+                        info!("Response: {}", s);
+                        if s.contains("OK") || s.contains("ERROR") {
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
+            Timer::after(Duration::from_millis(100)).await;
+        }
+    }
+
+    info!("EC800K initialization complete");
+
+    // Continue reading responses
+    let mut buf = [0u8; 512];
     loop {
         match rx.read(&mut buf).await {
             Ok(n) if n > 0 => {
                 if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                    info!("EC800K response: {}", s);
+                    info!("EC800K: {}", s);
                 }
             }
             _ => {}
