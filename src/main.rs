@@ -63,23 +63,10 @@ static EC800K_BAUD: embassy_sync::mutex::Mutex<
 
 #[embassy_executor::task]
 async fn http_server_task(stack: &'static Stack<'static>) {
-    // Wait for network to be ready
-    loop {
-        if stack.is_link_up() {
-            info!("Network link is up!");
-            break;
-        }
-        Timer::after(Duration::from_millis(500)).await;
-    }
-
-    info!("Waiting for IP configuration...");
-    loop {
-        if let Some(config) = stack.config_v4() {
-            info!("IP address: {:?}", config.address);
-            break;
-        }
-        Timer::after(Duration::from_millis(500)).await;
-    }
+    // Static IP is already configured, just wait a bit for stack initialization
+    info!("HTTP server task started");
+    Timer::after(Duration::from_millis(500)).await;
+    info!("Starting HTTP server on 192.168.4.1:80");
 
     let mut rx_buffer = [0; 8192];
     let mut tx_buffer = [0; 8192];
@@ -319,18 +306,21 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(net_task(runner).unwrap());
 
-    // Wait for stack to be ready
-    Timer::after(Duration::from_millis(100)).await;
-
-    // Start WiFi AP
+    // Start WiFi AP first
     info!("Starting WiFi AP...");
     info!("SSID: {}, Password: {}", WIFI_SSID, WIFI_PASSWORD);
 
     control.start_ap_wpa2(WIFI_SSID, WIFI_PASSWORD, 5).await;
     info!("AP started successfully!");
 
+    // Wait for network stack to be fully ready
+    Timer::after(Duration::from_secs(3)).await;
+    info!("Network stack ready");
+
     // Spawn HTTP server
+    info!("Starting HTTP server on port 80...");
     spawner.spawn(http_server_task(stack).unwrap());
+    info!("HTTP server task spawned");
 
     // Blink LED to indicate AP is running
     loop {
