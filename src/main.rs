@@ -57,7 +57,7 @@ async fn http_server_task(stack: &'static Stack<'static>) {
     let mut tx_buffer = [0; 4096];
 
     loop {
-        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+        let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(Duration::from_secs(10)));
 
         info!("Listening on TCP:80...");
@@ -154,7 +154,7 @@ async fn main(spawner: Spawner) {
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
-    spawner.spawn(cyw43_task(runner));
+    unwrap!(spawner.spawn(cyw43_task(runner)));
 
     control.init(clm).await;
     control
@@ -185,7 +185,7 @@ async fn main(spawner: Spawner) {
 
     let (uart_tx, uart_rx) = uart.split();
 
-    spawner.spawn(uart_task(uart_tx, uart_rx));
+    unwrap!(spawner.spawn(uart_task(uart_tx, uart_rx)));
 
     // Configure network stack for AP mode
     let config = Config::ipv4_static(embassy_net::StaticConfigV4 {
@@ -206,7 +206,7 @@ async fn main(spawner: Spawner) {
     );
     let stack = STACK.init(stack);
 
-    spawner.spawn(net_task(runner));
+    unwrap!(spawner.spawn(net_task(runner)));
 
     // Start WiFi AP
     info!("Starting WiFi AP...");
@@ -216,7 +216,7 @@ async fn main(spawner: Spawner) {
     info!("AP started successfully!");
 
     // Spawn HTTP server
-    spawner.spawn(http_server_task(stack));
+    unwrap!(spawner.spawn(http_server_task(stack)));
 
     // Blink LED to indicate AP is running
     loop {
