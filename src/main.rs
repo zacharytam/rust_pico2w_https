@@ -75,33 +75,59 @@ async fn http_server_task(stack: &'static Stack<'static>) {
 
     let mut rx_buffer = [0; 16384];
     let mut tx_buffer = [0; 16384];
+    let mut request_count = 0u32;
 
     loop {
         let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(Duration::from_secs(30)));
 
-        info!("Listening on TCP:80...");
+        info!(
+            "Listening on TCP:80... (requests served: {})",
+            request_count
+        );
         if let Err(e) = socket.accept(80).await {
             warn!("Accept error: {:?}", e);
+            Timer::after(Duration::from_millis(100)).await;
             continue;
         }
 
         info!("Received connection from {:?}", socket.remote_endpoint());
+        request_count += 1;
 
-        let _ = handle_client(&mut socket).await;
+        match handle_client(&mut socket).await {
+            Ok(_) => info!("Request #{} completed successfully", request_count),
+            Err(e) => warn!("Request #{} failed: {:?}", request_count, e),
+        }
+
+        // Ensure socket is fully closed
+        socket.abort();
+        Timer::after(Duration::from_millis(50)).await;
     }
 }
 
 async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tcp::Error> {
-    let mut buf = [0; 1024];
-    let n = socket.read(&mut buf).await?;
+    let mut buf = [0; 2048];
+
+    // Read request with timeout
+    let n = match embassy_time::with_timeout(Duration::from_secs(5), socket.read(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => {
+            warn!("Read error: {:?}", e);
+            return Err(e);
+        }
+        Err(_) => {
+            warn!("Read timeout");
+            return Ok(());
+        }
+    };
 
     if n == 0 {
+        info!("Empty request, closing");
         return Ok(());
     }
 
     let request = core::str::from_utf8(&buf[..n]).unwrap_or("");
-    info!("HTTP Request received:\n{}", request);
+    info!("HTTP Request ({} bytes)", n);
 
     // Parse HTTP request
     if let Some(first_line) = request.lines().next() {
@@ -121,33 +147,44 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             use core::fmt::Write as _;
             let _ = core::write!(
                 &mut response_str,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
-                <html><head><meta http-equiv='refresh' content='5'></head><body>\
-                <h1>Pico 2W Gateway</h1>\
-                <p><b>EC800K Status:</b> {}</p>\
-                <p><b>Baud Rate:</b> {}</p>\
-                <p><b>Request:</b> {} {}</p>\
-                <hr>\
-                <h2>EC800K Data Log:</h2>\
-                <pre style='background:#f0f0f0;padding:10px;overflow:auto;max-height:400px'>{}</pre>\
-                <p>Auto-refresh every 5 seconds</p>\
-                <p><small>China Telecom APN: ctnet</small></p>\
-                </body></html>\r\n",
-                *status,
-                *baud,
-                method,
-                path,
-                data.as_str()
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nContent-Length: ",
             );
 
+            let body = {
+                let mut body_str = heapless::String::<3500>::new();
+                let _ = core::write!(
+                    &mut body_str,
+                    "<html><head><meta http-equiv='refresh' content='5'><title>Pico 2W Gateway</title></head><body>\
+                    <h1>Pico 2W Gateway Status</h1>\
+                    <p><b>EC800K Status:</b> {}</p>\
+                    <p><b>Baud Rate:</b> {}</p>\
+                    <p><b>Request:</b> {} {}</p>\
+                    <p><b>Network:</b> AP Mode - 192.168.4.1</p>\
+                    <hr>\
+                    <h2>EC800K Data Log:</h2>\
+                    <pre style='background:#f0f0f0;padding:10px;overflow:auto;max-height:400px;font-size:12px'>{}</pre>\
+                    <p><small>Auto-refresh: 5s | China Telecom APN: ctnet</small></p>\
+                    </body></html>",
+                    *status,
+                    *baud,
+                    method,
+                    path,
+                    data.as_str()
+                );
+                body_str
+            };
+
+            let _ = core::write!(&mut response_str, "{}\r\n\r\n{}", body.len(), body.as_str());
+
+            // Write response
+            info!("Sending response ({} bytes)", response_str.len());
             socket.write_all(response_str.as_bytes()).await?;
+            socket.flush().await?;
+            info!("Response sent successfully");
         }
     }
 
-    socket.flush().await?;
-    socket.close();
-    Timer::after(Duration::from_millis(10)).await;
-
+    Timer::after(Duration::from_millis(100)).await;
     Ok(())
 }
 
