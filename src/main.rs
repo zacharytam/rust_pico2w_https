@@ -141,13 +141,13 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
 }
 
 #[embassy_executor::task]
-async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
+async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u32) {
     info!("UART task started - Initializing EC800K for China Telecom");
 
-    // Get current baud rate from config (115200 by default)
+    // Update baud rate status
     {
         let mut baud = EC800K_BAUD.lock().await;
-        *baud = 115200; // Will be updated after testing
+        *baud = baud_rate;
     }
 
     Timer::after(Duration::from_secs(2)).await;
@@ -282,7 +282,7 @@ async fn main(spawner: Spawner) {
 
     let (uart_tx, uart_rx) = uart.split();
 
-    spawner.spawn(uart_task(uart_tx, uart_rx).unwrap());
+    spawner.spawn(uart_task(uart_tx, uart_rx, uart_config.baudrate).unwrap());
 
     // Configure network stack for AP mode with static IP
     // Note: Clients must manually configure IP (192.168.4.2-254) as there's no DHCP server
