@@ -51,6 +51,16 @@ async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'sta
     runner.run().await
 }
 
+static EC800K_STATUS: embassy_sync::mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    &str,
+> = embassy_sync::mutex::Mutex::new("Initializing...");
+
+static EC800K_BAUD: embassy_sync::mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    u32,
+> = embassy_sync::mutex::Mutex::new(115200);
+
 #[embassy_executor::task]
 async fn http_server_task(stack: &'static Stack<'static>) {
     // Wait for network to be ready
@@ -71,8 +81,8 @@ async fn http_server_task(stack: &'static Stack<'static>) {
         Timer::after(Duration::from_millis(500)).await;
     }
 
-    let mut rx_buffer = [0; 4096];
-    let mut tx_buffer = [0; 4096];
+    let mut rx_buffer = [0; 8192];
+    let mut tx_buffer = [0; 8192];
 
     loop {
         let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
@@ -109,10 +119,27 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let path = parts[1];
             info!("Method: {}, Path: {}", method, path);
 
-            // TODO: Forward to EC800K via AT commands
-            // For now, send a simple response
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Pico 2W Gateway</h1><p>Connected via EC800K (China Telecom)</p><p>Internet routing not yet implemented</p></body></html>\r\n";
-            socket.write_all(response.as_bytes()).await?;
+            // Get EC800K status
+            let status = EC800K_STATUS.lock().await;
+            let baud = EC800K_BAUD.lock().await;
+
+            let mut response_buf = heapless::Vec::<u8, 512>::new();
+            use core::fmt::Write;
+            let _ = write!(
+                &mut response_buf,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+                <html><head><meta http-equiv='refresh' content='5'></head><body>\
+                <h1>Pico 2W Gateway</h1>\
+                <p><b>EC800K Status:</b> {}</p>\
+                <p><b>Baud Rate:</b> {}</p>\
+                <p><b>Request:</b> {} {}</p>\
+                <p>Auto-refresh every 5 seconds</p>\
+                <p><small>China Telecom APN: ctnet</small></p>\
+                </body></html>\r\n",
+                *status, *baud, method, path
+            );
+
+            socket.write_all(&response_buf).await?;
         }
     }
 
@@ -126,9 +153,20 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
 async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
     info!("UART task started - Initializing EC800K for China Telecom");
 
+    // Get current baud rate from config (115200 by default)
+    {
+        let mut baud = EC800K_BAUD.lock().await;
+        *baud = 115200; // Will be updated after testing
+    }
+
     Timer::after(Duration::from_secs(2)).await;
 
-    // Initialize EC800K modem
+    {
+        let mut status = EC800K_STATUS.lock().await;
+        *status = "Testing connection...";
+    }
+
+    // Initialize EC800K modem for China Telecom
     let init_commands: &[&[u8]] = &[
         b"AT\r\n",                            // Test AT
         b"ATE0\r\n",                          // Disable echo
@@ -148,10 +186,12 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
         // Read response
         let mut buf = [0u8; 512];
         let mut total_read = 0;
+        let mut got_response = false;
         for _ in 0..10 {
             match rx.read(&mut buf[total_read..]).await {
                 Ok(n) if n > 0 => {
                     total_read += n;
+                    got_response = true;
                     if let Ok(s) = core::str::from_utf8(&buf[..total_read]) {
                         info!("Response: {}", s);
                         if s.contains("OK") || s.contains("ERROR") {
@@ -163,6 +203,16 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
             }
             Timer::after(Duration::from_millis(100)).await;
         }
+
+        if !got_response {
+            let mut status = EC800K_STATUS.lock().await;
+            *status = "ERROR: No response from EC800K";
+        }
+    }
+
+    {
+        let mut status = EC800K_STATUS.lock().await;
+        *status = "Initialization complete";
     }
 
     info!("EC800K initialization complete");
@@ -212,20 +262,22 @@ async fn main(spawner: Spawner) {
 
     control.init(clm).await;
     control
-        .set_power_management(cyw43::PowerManagementMode::PowerSave)
+        .set_power_management(cyw43::PowerManagementMode::Performance)
         .await;
 
     // Initialize UART for EC800K
     // GP0 = TX (to EC800K RX)
     // GP1 = RX (from EC800K TX)
 
-    static UART_TX_BUF: StaticCell<[u8; 256]> = StaticCell::new();
-    static UART_RX_BUF: StaticCell<[u8; 256]> = StaticCell::new();
-    let uart_tx_buf = UART_TX_BUF.init([0u8; 256]);
-    let uart_rx_buf = UART_RX_BUF.init([0u8; 256]);
+    static UART_TX_BUF: StaticCell<[u8; 1024]> = StaticCell::new();
+    static UART_RX_BUF: StaticCell<[u8; 1024]> = StaticCell::new();
+    let uart_tx_buf = UART_TX_BUF.init([0u8; 1024]);
+    let uart_rx_buf = UART_RX_BUF.init([0u8; 1024]);
 
     let mut uart_config = UartConfig::default();
-    uart_config.baudrate = 115200;
+    // Manual testing: Try 115200, 230400, 460800, 921600
+    // Change this value, rebuild, and see if EC800K responds in logs
+    uart_config.baudrate = 115200; // Change this to test: 230400, 460800, or 921600
 
     let uart = BufferedUart::new(
         p.UART0,
@@ -252,11 +304,11 @@ async fn main(spawner: Spawner) {
     let seed = 0x0123_4567_89ab_cdef; // Random seed for network stack
 
     static STACK: StaticCell<Stack<'static>> = StaticCell::new();
-    static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
+    static RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         net_device,
         config,
-        RESOURCES.init(StackResources::<3>::new()),
+        RESOURCES.init(StackResources::<8>::new()),
         seed,
     );
     let stack = STACK.init(stack);
