@@ -1,0 +1,84 @@
+name: Build UF2 Firmware
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: thumbv8m.main-none-eabihf
+          override: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y cmake gcc-arm-none-eabi libusb-1.0-0-dev git build-essential libudev-dev pkg-config unzip wget
+
+      - name: Cache pico-sdk
+        id: cache-pico-sdk
+        uses: actions/cache@v3
+        with:
+          path: pico-sdk
+          key: pico-sdk
+
+      - name: Download pico-sdk
+        if: steps.cache-pico-sdk.outputs.cache-hit != 'true'
+        run: |
+          wget https://github.com/raspberrypi/pico-sdk/archive/a1438dff1d38bd9c65dbd693f0e5db4b9ae91779.zip -O pico-sdk.zip
+          unzip pico-sdk.zip
+          mv pico-sdk-a1438dff1d38bd9c65dbd693f0e5db4b9ae91779 pico-sdk
+
+      - name: Cache picotool
+        id: cache-picotool
+        uses: actions/cache@v3
+        with:
+          path: picotool/build
+          key: picotool-build
+
+      - name: Download & Build picotool
+        if: steps.cache-picotool.outputs.cache-hit != 'true'
+        run: |
+          wget https://github.com/raspberrypi/picotool/archive/25aa087b2c517b4901874a99536e869d4d27b678.zip -O picotool.zip
+          unzip picotool.zip
+          mv picotool-25aa087b2c517b4901874a99536e869d4d27b678 picotool
+          cd picotool
+          mkdir -p build && cd build
+          cmake .. -DPICO_SDK_PATH=../../pico-sdk
+          make -j$(nproc)
+
+      - name: Create firmware directory
+        run: mkdir -p cyw43-firmware
+
+      - name: Download CYW43 firmware
+        run: |
+          wget https://github.com/embassy-rs/embassy/raw/main/cyw43-firmware/43439A0.bin -O cyw43-firmware/43439A0.bin
+          wget https://github.com/embassy-rs/embassy/raw/main/cyw43-firmware/43439A0_clm.bin -O cyw43-firmware/43439A0_clm.bin
+
+      - name: Build firmware (release)
+        run: cargo build --release --target thumbv8m.main-none-eabihf
+
+      - name: Prepare ELF
+        run: |
+          mkdir -p out
+          cp target/thumbv8m.main-none-eabihf/release/pico2w-wifi-gateway out/firmware.elf
+
+      - name: Convert ELF to UF2
+        run: |
+          ./picotool/build/picotool uf2 convert out/firmware.elf \
+            out/firmware.uf2 \
+            --abs-block 0x10010000 --family 0xE48BFF57 --offset 0x10000000
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico2w_gateway_firmware
+          path: out/firmware.uf2
