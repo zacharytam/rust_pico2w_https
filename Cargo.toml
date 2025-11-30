@@ -10,7 +10,7 @@ embassy-sync          = { git = "https://github.com/embassy-rs/embassy.git", rev
 embassy-executor      = { git = "https://github.com/embassy-rs/embassy.git", rev = "286d887529c66d8d1b4c7b56849e7a95386d79db", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-time          = { git = "https://github.com/embassy-rs/embassy.git", rev = "286d887529c66d8d1b4c7b56849e7a95386d79db", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-rp            = { git = "https://github.com/embassy-rs/embassy.git", rev = "286d887529c66d8d1b4c7b56849e7a95386d79db", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xa", "binary-info"] }
-embassy-net           = { git = "https://github.com/embassy-rs/embassy.git", rev = "286d887529c66d8d1b4c7b56849e7a95386d79db", features = ["defmt", "tcp", "udp", "dhcpv4", "medium-ethernet", "dns"] }
+embassy-net           = { git = "https://github.com/embassy-rs/embassy.git", rev = "286d887529c66d8d1b4c7b56849e7a95386d79db", features = ["defmt", "tcp", "udp", "dhcpv4", "dhcpv4-server", "medium-ethernet", "dns"] }
 embassy-futures       = { git = "https://github.com/embassy-rs/embassy.git", rev = "286d887529c66d8d1b4c7b56849e7a95386d79db" }
 
 cyw43     = { git = "https://github.com/embassy-rs/embassy.git", rev = "286d887529c66d8d1b4c7b56849e7a95386d79db", features = ["defmt", "firmware-logs"] }
