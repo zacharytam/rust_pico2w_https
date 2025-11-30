@@ -61,6 +61,11 @@ static EC800K_BAUD: embassy_sync::mutex::Mutex<
     u32,
 > = embassy_sync::mutex::Mutex::new(115200);
 
+static EC800K_DATA: embassy_sync::mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    heapless::String<1024>,
+> = embassy_sync::mutex::Mutex::new(heapless::String::new());
+
 #[embassy_executor::task]
 async fn http_server_task(stack: &'static Stack<'static>) {
     // Static IP is already configured, just wait a bit for stack initialization
@@ -109,9 +114,10 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             // Get EC800K status
             let status = EC800K_STATUS.lock().await;
             let baud = EC800K_BAUD.lock().await;
+            let data = EC800K_DATA.lock().await;
 
             // Build response string
-            let mut response_str = heapless::String::<512>::new();
+            let mut response_str = heapless::String::<2048>::new();
             use core::fmt::Write as _;
             let _ = core::write!(
                 &mut response_str,
@@ -121,13 +127,17 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
                 <p><b>EC800K Status:</b> {}</p>\
                 <p><b>Baud Rate:</b> {}</p>\
                 <p><b>Request:</b> {} {}</p>\
+                <hr>\
+                <h2>EC800K Data Log:</h2>\
+                <pre style='background:#f0f0f0;padding:10px;overflow:auto;max-height:400px'>{}</pre>\
                 <p>Auto-refresh every 5 seconds</p>\
                 <p><small>China Telecom APN: ctnet</small></p>\
                 </body></html>\r\n",
                 *status,
                 *baud,
                 method,
-                path
+                path,
+                data.as_str()
             );
 
             socket.write_all(response_str.as_bytes()).await?;
@@ -208,13 +218,25 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
 
     info!("EC800K initialization complete");
 
-    // Continue reading responses
+    // Continue reading responses and log to web interface
     let mut buf = [0u8; 512];
     loop {
         match rx.read(&mut buf).await {
             Ok(n) if n > 0 => {
                 if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                     info!("EC800K: {}", s);
+
+                    // Update the data log for web display
+                    let mut data = EC800K_DATA.lock().await;
+                    // Keep last 800 chars to prevent overflow
+                    if data.len() > 800 {
+                        let start = data.len() - 600;
+                        let tail = &data[start..];
+                        data.clear();
+                        let _ = data.push_str("...[truncated]...\n");
+                        let _ = data.push_str(tail);
+                    }
+                    let _ = data.push_str(s);
                 }
             }
             _ => {}
