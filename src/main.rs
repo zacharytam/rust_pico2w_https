@@ -5,7 +5,7 @@ use cyw43_pio::{PioSpi, RM2_CLOCK_DIVIDER};
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{Config, Stack, StackResources, DhcpConfig};
+use embassy_net::{Config, Stack, StackResources};
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0, UART0};
@@ -241,22 +241,12 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(uart_task(uart_tx, uart_rx).unwrap());
 
-    // Configure network stack for AP mode with static IP and DHCP server
-    let mut dns_servers = heapless::Vec::new();
-    let _ = dns_servers.push(embassy_net::Ipv4Address::new(8, 8, 8, 8));
-
-    let mut config = Config::ipv4_static(embassy_net::StaticConfigV4 {
+    // Configure network stack for AP mode with static IP
+    // Note: Clients must manually configure IP (192.168.4.2-254) as there's no DHCP server
+    let config = Config::ipv4_static(embassy_net::StaticConfigV4 {
         address: embassy_net::Ipv4Cidr::new(embassy_net::Ipv4Address::new(192, 168, 4, 1), 24),
         gateway: Some(embassy_net::Ipv4Address::new(192, 168, 4, 1)),
-        dns_servers,
-    });
-
-    // Enable DHCP server for AP
-    config.dhcpv4_server = Some(DhcpConfig {
-        server_addr: embassy_net::Ipv4Address::new(192, 168, 4, 1),
-        client_subnet: embassy_net::Ipv4Cidr::new(embassy_net::Ipv4Address::new(192, 168, 4, 100), 24),
-        max_lease_duration: Some(embassy_time::Duration::from_secs(3600)),
-        ..Default::default()
+        dns_servers: heapless::Vec::new(),
     });
 
     let seed = 0x0123_4567_89ab_cdef; // Random seed for network stack
