@@ -40,14 +40,14 @@ async fn cyw43_task(runner: cyw43::Runner<'static, Output<'static>, PioSpi<'stat
 }
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<'_>) -> ! {
+async fn net_task(stack: &'static Stack<'static>) -> ! {
     stack.run().await
 }
 
 #[embassy_executor::task]
 async fn http_server_task(
-    stack: &'static Stack<'_>,
-    uart_rx: &'static embassy_sync::mutex::Mutex<embassy_sync::blocking_mutex::raw::NoopRawMutex, BufferedUartRx<UART0>>,
+    stack: &'static Stack<'static>,
+    _uart_rx: &'static embassy_sync::mutex::Mutex<embassy_sync::blocking_mutex::raw::NoopRawMutex, BufferedUartRx>,
 ) {
     let mut rx_buffer = [0; 4096];
     let mut tx_buffer = [0; 4096];
@@ -64,13 +64,12 @@ async fn http_server_task(
 
         info!("Received connection from {:?}", socket.remote_endpoint());
 
-        let _ = handle_client(&mut socket, uart_rx).await;
+        let _ = handle_client(&mut socket).await;
     }
 }
 
 async fn handle_client(
     socket: &mut TcpSocket<'_>,
-    _uart_rx: &'static embassy_sync::mutex::Mutex<embassy_sync::blocking_mutex::raw::NoopRawMutex, BufferedUartRx<UART0>>,
 ) -> Result<(), embassy_net::tcp::Error> {
     let mut buf = [0; 1024];
     let n = socket.read(&mut buf).await?;
@@ -129,7 +128,7 @@ async fn main(spawner: Spawner) {
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
-    spawner.spawn(cyw43_task(runner)).unwrap();
+    unwrap!(spawner.spawn(cyw43_task(runner)));
 
     control.init(clm).await;
     control.set_power_management(cyw43::PowerManagementMode::PowerSave).await;
@@ -160,7 +159,7 @@ async fn main(spawner: Spawner) {
     
     let (_uart_tx, uart_rx_split) = uart.split();
     
-    static UART_RX_MUTEX: StaticCell<embassy_sync::mutex::Mutex<embassy_sync::blocking_mutex::raw::NoopRawMutex, BufferedUartRx<UART0>>> = StaticCell::new();
+    static UART_RX_MUTEX: StaticCell<embassy_sync::mutex::Mutex<embassy_sync::blocking_mutex::raw::NoopRawMutex, BufferedUartRx>> = StaticCell::new();
     let _uart_rx_mutex = UART_RX_MUTEX.init(embassy_sync::mutex::Mutex::new(uart_rx_split));
 
     // Configure network stack for AP mode
@@ -181,7 +180,7 @@ async fn main(spawner: Spawner) {
         seed,
     ));
 
-    spawner.spawn(net_task(stack)).unwrap();
+    unwrap!(spawner.spawn(net_task(stack)));
 
     // Start WiFi AP
     info!("Starting WiFi AP...");
@@ -199,5 +198,5 @@ async fn main(spawner: Spawner) {
     }
 
     // Note: HTTP server task is commented out for now as we need to implement EC800K AT commands
-    // spawner.spawn(http_server_task(stack, uart_rx_mutex)).unwrap();
+    // unwrap!(spawner.spawn(http_server_task(stack, uart_rx_mutex)));
 }
