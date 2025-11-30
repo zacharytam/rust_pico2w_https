@@ -268,7 +268,7 @@ async fn main(spawner: Spawner) {
     let mut uart_config = UartConfig::default();
     // Manual testing: Try 115200, 230400, 460800, 921600
     // Change this value, rebuild, and see if EC800K responds in logs
-    uart_config.baudrate = 460800; // Change this to test: 230400, 460800, or 921600
+    uart_config.baudrate = 921600; // Change this to test: 230400, 460800, or 921600
 
     let uart = BufferedUart::new(
         p.UART0,
