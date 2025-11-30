@@ -66,6 +66,16 @@ static EC800K_DATA: embassy_sync::mutex::Mutex<
     heapless::String<1024>,
 > = embassy_sync::mutex::Mutex::new(heapless::String::new());
 
+static UART_TX_COUNT: embassy_sync::mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    u32,
+> = embassy_sync::mutex::Mutex::new(0);
+
+static UART_RX_COUNT: embassy_sync::mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    u32,
+> = embassy_sync::mutex::Mutex::new(0);
+
 #[embassy_executor::task]
 async fn http_server_task(stack: &'static Stack<'static>) {
     // Static IP is already configured, just wait a bit for stack initialization
@@ -141,6 +151,8 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let status = EC800K_STATUS.lock().await;
             let baud = EC800K_BAUD.lock().await;
             let data = EC800K_DATA.lock().await;
+            let tx_count = UART_TX_COUNT.lock().await;
+            let rx_count = UART_RX_COUNT.lock().await;
 
             // Build response string
             let mut response_str = heapless::String::<4096>::new();
@@ -156,20 +168,35 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
                     &mut body_str,
                     "<html><head><meta http-equiv='refresh' content='5'><title>Pico 2W Gateway</title></head><body>\
                     <h1>Pico 2W Gateway Status</h1>\
-                    <p><b>EC800K Status:</b> {}</p>\
-                    <p><b>Baud Rate:</b> {}</p>\
+                    <p><b>EC800K Status:</b> <span style='color:{}'>{}</span></p>\
+                    <p><b>Baud Rate:</b> {} baud</p>\
+                    <p><b>UART TX:</b> {} bytes | <b>RX:</b> {} bytes</p>\
                     <p><b>Request:</b> {} {}</p>\
                     <p><b>Network:</b> AP Mode - 192.168.4.1</p>\
                     <hr>\
                     <h2>EC800K Data Log:</h2>\
                     <pre style='background:#f0f0f0;padding:10px;overflow:auto;max-height:400px;font-size:12px'>{}</pre>\
                     <p><small>Auto-refresh: 5s | China Telecom APN: ctnet</small></p>\
+                    <p style='color:#666'><small>Debug: If RX=0, check UART wiring (GP0→EC800K_RX, GP1→EC800K_TX, GND)</small></p>\
                     </body></html>",
+                    if status.contains("ERROR") {
+                        "red"
+                    } else if status.contains("complete") {
+                        "green"
+                    } else {
+                        "orange"
+                    },
                     *status,
                     *baud,
+                    *tx_count,
+                    *rx_count,
                     method,
                     path,
-                    data.as_str()
+                    if data.is_empty() {
+                        "[No data received - Check UART connection]"
+                    } else {
+                        data.as_str()
+                    }
                 );
                 body_str
             };
@@ -190,7 +217,7 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
 
 #[embassy_executor::task]
 async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u32) {
-    info!("UART task started - Initializing EC800K for China Telecom");
+    info!("UART task started - Testing EC800K connection");
 
     // Update baud rate status
     {
@@ -198,11 +225,105 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
         *baud = baud_rate;
     }
 
+    // Add diagnostic data immediately
+    {
+        let mut data = EC800K_DATA.lock().await;
+        let _ = data.push_str("=== UART Task Started ===\n");
+        let _ = core::fmt::Write::write_fmt(
+            &mut *data,
+            format_args!("Baud: {} | Pins: GP0(TX), GP1(RX)\n", baud_rate),
+        );
+        let _ = data.push_str("Waiting 2s before testing...\n");
+    }
+
     Timer::after(Duration::from_secs(2)).await;
 
     {
         let mut status = EC800K_STATUS.lock().await;
-        *status = "Testing connection...";
+        *status = "Testing AT command...";
+    }
+
+    // Simple AT test first
+    info!("Sending test AT command");
+    {
+        let mut data = EC800K_DATA.lock().await;
+        let _ = data.push_str(">> AT\\r\\n\n");
+    }
+
+    let test_at = b"AT\r\n";
+    match tx.write_all(test_at).await {
+        Ok(_) => {
+            info!("AT command sent successfully");
+            let mut tx_count = UART_TX_COUNT.lock().await;
+            *tx_count += test_at.len() as u32;
+        }
+        Err(_) => {
+            info!("ERROR: Failed to send AT command");
+            let mut status = EC800K_STATUS.lock().await;
+            *status = "ERROR: UART TX failed";
+        }
+    }
+
+    Timer::after(Duration::from_secs(1)).await;
+
+    // Check for response
+    let mut buf = [0u8; 256];
+    let mut got_response = false;
+    for attempt in 0..5 {
+        match rx.read(&mut buf).await {
+            Ok(n) if n > 0 => {
+                got_response = true;
+                let mut rx_count = UART_RX_COUNT.lock().await;
+                *rx_count += n as u32;
+
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    info!("GOT RESPONSE: {}", s);
+                    let mut data = EC800K_DATA.lock().await;
+                    let _ = data.push_str("<< ");
+                    let _ = data.push_str(s);
+                    let _ = data.push_str("\n");
+                }
+                break;
+            }
+            _ => {
+                info!("Read attempt {}: no data", attempt + 1);
+            }
+        }
+        Timer::after(Duration::from_millis(200)).await;
+    }
+
+    if !got_response {
+        warn!("NO RESPONSE from EC800K after AT command!");
+        let mut status = EC800K_STATUS.lock().await;
+        *status = "ERROR: No response (check wiring)";
+        let mut data = EC800K_DATA.lock().await;
+        let _ = data.push_str("!! NO RESPONSE - Check:\n");
+        let _ = data.push_str("  1. EC800K powered on?\n");
+        let _ = data.push_str("  2. GP0 -> EC800K RX\n");
+        let _ = data.push_str("  3. GP1 -> EC800K TX\n");
+        let _ = data.push_str("  4. GND connected\n");
+        let _ = data.push_str("  5. Try 115200 baud\n");
+
+        // Keep trying to read
+        loop {
+            match rx.read(&mut buf).await {
+                Ok(n) if n > 0 => {
+                    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                        info!("Late response: {}", s);
+                        let mut data = EC800K_DATA.lock().await;
+                        let _ = data.push_str("<< LATE: ");
+                        let _ = data.push_str(s);
+                    }
+                }
+                _ => {}
+            }
+            Timer::after(Duration::from_secs(1)).await;
+        }
+    }
+
+    {
+        let mut status = EC800K_STATUS.lock().await;
+        *status = "AT OK - Initializing modem...";
     }
 
     // Initialize EC800K modem for China Telecom
@@ -222,6 +343,11 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
         let _ = tx.write_all(*cmd).await;
         Timer::after(Duration::from_secs(2)).await;
 
+        {
+            let mut tx_count = UART_TX_COUNT.lock().await;
+            *tx_count += cmd.len() as u32;
+        }
+
         // Read response
         let mut buf = [0u8; 512];
         let mut total_read = 0;
@@ -231,8 +357,18 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
                 Ok(n) if n > 0 => {
                     total_read += n;
                     got_response = true;
+
+                    let mut rx_count = UART_RX_COUNT.lock().await;
+                    *rx_count += n as u32;
+
                     if let Ok(s) = core::str::from_utf8(&buf[..total_read]) {
                         info!("Response: {}", s);
+
+                        // Log to web interface
+                        let mut data = EC800K_DATA.lock().await;
+                        let _ = data.push_str("<< ");
+                        let _ = data.push_str(s);
+
                         if s.contains("OK") || s.contains("ERROR") {
                             break;
                         }
@@ -245,7 +381,7 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
 
         if !got_response {
             let mut status = EC800K_STATUS.lock().await;
-            *status = "ERROR: No response from EC800K";
+            *status = "ERROR: No response during init";
         }
     }
 
@@ -261,6 +397,9 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
     loop {
         match rx.read(&mut buf).await {
             Ok(n) if n > 0 => {
+                let mut rx_count = UART_RX_COUNT.lock().await;
+                *rx_count += n as u32;
+
                 if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                     info!("EC800K: {}", s);
 
@@ -275,6 +414,7 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
                         let _ = data.push_str("...[truncated]...\n");
                         let _ = data.push_str(tail_buf.as_str());
                     }
+                    let _ = data.push_str("<< ");
                     let _ = data.push_str(s);
                 }
             }
