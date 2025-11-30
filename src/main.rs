@@ -123,10 +123,11 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let status = EC800K_STATUS.lock().await;
             let baud = EC800K_BAUD.lock().await;
 
-            let mut response_buf = heapless::Vec::<u8, 512>::new();
-            use core::fmt::Write;
-            let _ = write!(
-                &mut response_buf,
+            // Build response string
+            let mut response_str = heapless::String::<512>::new();
+            use core::fmt::Write as _;
+            let _ = core::write!(
+                &mut response_str,
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
                 <html><head><meta http-equiv='refresh' content='5'></head><body>\
                 <h1>Pico 2W Gateway</h1>\
@@ -136,10 +137,13 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
                 <p>Auto-refresh every 5 seconds</p>\
                 <p><small>China Telecom APN: ctnet</small></p>\
                 </body></html>\r\n",
-                *status, *baud, method, path
+                *status,
+                *baud,
+                method,
+                path
             );
 
-            socket.write_all(&response_buf).await?;
+            socket.write_all(response_str.as_bytes()).await?;
         }
     }
 
