@@ -8,9 +8,9 @@ use embassy_net::tcp::TcpSocket;
 use embassy_net::{Config, Stack, StackResources};
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{DMA_CH0, PIO0, UART0};
+use embassy_rp::peripherals::{DMA_CH0, PIO0, UART0, PIN_0, PIN_1};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
-use embassy_rp::uart::{BufferedInterruptHandler, BufferedUart, BufferedUartRx, Config as UartConfig};
+use embassy_rp::uart::{BufferedInterruptHandler, BufferedUart, BufferedUartRx, BufferedUartTx, Config as UartConfig};
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write;
 use static_cell::StaticCell;
@@ -40,14 +40,13 @@ async fn cyw43_task(runner: cyw43::Runner<'static, Output<'static>, PioSpi<'stat
 }
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<'static>) -> ! {
-    stack.run().await
+async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
+    runner.run().await
 }
 
 #[embassy_executor::task]
 async fn http_server_task(
-    stack: &'static Stack<'static>,
-    _uart_rx: &'static embassy_sync::mutex::Mutex<embassy_sync::blocking_mutex::raw::NoopRawMutex, BufferedUartRx>,
+    stack: &'static Stack<cyw43::NetDriver<'static>>,
 ) {
     let mut rx_buffer = [0; 4096];
     let mut tx_buffer = [0; 4096];
@@ -102,6 +101,30 @@ async fn handle_client(
     Ok(())
 }
 
+#[embassy_executor::task]
+async fn uart_task(mut tx: BufferedUartTx<'static, UART0>, mut rx: BufferedUartRx<'static, UART0>) {
+    info!("UART task started");
+    
+    // Test EC800K communication
+    let test_cmd = b"AT\r\n";
+    let _ = tx.write_all(test_cmd).await;
+    info!("Sent AT command to EC800K");
+    
+    // Read responses
+    let mut buf = [0u8; 256];
+    loop {
+        match rx.read(&mut buf).await {
+            Ok(n) if n > 0 => {
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    info!("EC800K response: {}", s);
+                }
+            }
+            _ => {}
+        }
+        Timer::after(Duration::from_millis(100)).await;
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -128,7 +151,7 @@ async fn main(spawner: Spawner) {
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
-    unwrap!(spawner.spawn(cyw43_task(runner)));
+    spawner.spawn(cyw43_task(runner)).ok();
 
     control.init(clm).await;
     control.set_power_management(cyw43::PowerManagementMode::PowerSave).await;
@@ -136,8 +159,6 @@ async fn main(spawner: Spawner) {
     // Initialize UART for EC800K
     // GP0 = TX (to EC800K RX)
     // GP1 = RX (from EC800K TX)
-    let uart_tx = p.PIN_0;
-    let uart_rx = p.PIN_1;
     
     static UART_TX_BUF: StaticCell<[u8; 256]> = StaticCell::new();
     static UART_RX_BUF: StaticCell<[u8; 256]> = StaticCell::new();
@@ -150,17 +171,16 @@ async fn main(spawner: Spawner) {
     let uart = BufferedUart::new(
         p.UART0,
         Irqs,
-        uart_rx,
-        uart_tx,
+        p.PIN_1,
+        p.PIN_0,
         uart_tx_buf,
         uart_rx_buf,
         uart_config,
     );
     
-    let (_uart_tx, uart_rx_split) = uart.split();
+    let (uart_tx, uart_rx) = uart.split();
     
-    static UART_RX_MUTEX: StaticCell<embassy_sync::mutex::Mutex<embassy_sync::blocking_mutex::raw::NoopRawMutex, BufferedUartRx>> = StaticCell::new();
-    let _uart_rx_mutex = UART_RX_MUTEX.init(embassy_sync::mutex::Mutex::new(uart_rx_split));
+    spawner.spawn(uart_task(uart_tx, uart_rx)).ok();
 
     // Configure network stack for AP mode
     let config = Config::ipv4_static(embassy_net::StaticConfigV4 {
@@ -171,16 +191,17 @@ async fn main(spawner: Spawner) {
 
     let seed = 0x0123_4567_89ab_cdef; // Random seed for network stack
 
-    static STACK: StaticCell<Stack<'static>> = StaticCell::new();
+    static STACK: StaticCell<Stack<cyw43::NetDriver<'static>>> = StaticCell::new();
     static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
-    let stack = &*STACK.init(Stack::new(
+    let (stack, runner) = embassy_net::new(
         net_device,
         config,
         RESOURCES.init(StackResources::<3>::new()),
         seed,
-    ));
+    );
+    let stack = STACK.init(stack);
 
-    unwrap!(spawner.spawn(net_task(stack)));
+    spawner.spawn(net_task(runner)).ok();
 
     // Start WiFi AP
     info!("Starting WiFi AP...");
@@ -189,6 +210,9 @@ async fn main(spawner: Spawner) {
     control.start_ap_wpa2(WIFI_SSID, WIFI_PASSWORD, 5).await;
     info!("AP started successfully!");
 
+    // Spawn HTTP server
+    spawner.spawn(http_server_task(stack)).ok();
+
     // Blink LED to indicate AP is running
     loop {
         control.gpio_set(0, true).await;
@@ -196,7 +220,4 @@ async fn main(spawner: Spawner) {
         control.gpio_set(0, false).await;
         Timer::after(Duration::from_millis(900)).await;
     }
-
-    // Note: HTTP server task is commented out for now as we need to implement EC800K AT commands
-    // unwrap!(spawner.spawn(http_server_task(stack, uart_rx_mutex)));
 }
