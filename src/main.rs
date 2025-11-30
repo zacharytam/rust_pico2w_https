@@ -231,10 +231,11 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
                     // Keep last 800 chars to prevent overflow
                     if data.len() > 800 {
                         let start = data.len() - 600;
-                        let tail = &data[start..];
+                        let mut tail_buf = heapless::String::<600>::new();
+                        let _ = tail_buf.push_str(&data[start..]);
                         data.clear();
                         let _ = data.push_str("...[truncated]...\n");
-                        let _ = data.push_str(tail);
+                        let _ = data.push_str(tail_buf.as_str());
                     }
                     let _ = data.push_str(s);
                 }
