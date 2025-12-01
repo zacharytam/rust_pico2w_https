@@ -471,9 +471,12 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
         // Send HTTP GET request via TCP
         let http_request = b"GET /get HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n";
 
+        let mut len_str = heapless::String::<8>::new();
+        use core::fmt::Write as _;
+        let _ = core::write!(&mut len_str, "{}", http_request.len());
+
         let send_cmd = b"AT+QISEND=0,";
         let _ = tx.write_all(send_cmd).await;
-        let len_str = http_request.len().to_string();
         let _ = tx.write_all(len_str.as_bytes()).await;
         let _ = tx.write_all(b"\r\n").await;
 
