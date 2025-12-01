@@ -66,14 +66,11 @@ static EC800K_DATA: embassy_sync::mutex::Mutex<
     heapless::String<1024>,
 > = embassy_sync::mutex::Mutex::new(heapless::String::new());
 
-<<<<<<< HEAD
 static HTTP_RESPONSE: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     heapless::String<2048>,
 > = embassy_sync::mutex::Mutex::new(heapless::String::new());
 
-=======
->>>>>>> 0743bbaa3648b2535a666a62628cf00ce91fea51
 static UART_TX_COUNT: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     u32,
