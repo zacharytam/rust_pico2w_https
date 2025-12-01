@@ -262,8 +262,13 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
         let _ = data.push_str("Waiting for modem to stabilize...\n");
     }
 
-    // Wait longer for modem to boot and clear RDY messages
-    Timer::after(Duration::from_secs(5)).await;
+    {
+        let mut status = EC800K_STATUS.lock().await;
+        *status = "Waiting for modem...";
+    }
+
+    // Wait for modem to boot and clear RDY messages
+    Timer::after(Duration::from_secs(3)).await;
 
     // Clear any pending RDY messages
     let mut buf = [0u8; 512];
@@ -280,13 +285,13 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
     }
 
     {
-        let mut data = EC800K_DATA.lock().await;
-        let _ = data.push_str("Modem ready, starting init...\n");
+        let mut status = EC800K_STATUS.lock().await;
+        *status = "Testing AT command...";
     }
 
     {
-        let mut status = EC800K_STATUS.lock().await;
-        *status = "Testing AT command...";
+        let mut data = EC800K_DATA.lock().await;
+        let _ = data.push_str("Modem ready, starting init...\n");
     }
 
     // Simple AT test first
@@ -297,18 +302,12 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
     }
 
     let test_at = b"AT\r\n";
-    match tx.write_all(test_at).await {
-        Ok(_) => {
-            info!("AT command sent successfully");
-            let mut tx_count = UART_TX_COUNT.lock().await;
-            *tx_count += test_at.len() as u32;
-        }
-        Err(_) => {
-            info!("ERROR: Failed to send AT command");
-            let mut status = EC800K_STATUS.lock().await;
-            *status = "ERROR: UART TX failed";
-        }
+    let _ = tx.write_all(test_at).await;
+    {
+        let mut tx_count = UART_TX_COUNT.lock().await;
+        *tx_count += test_at.len() as u32;
     }
+    info!("AT command sent ({} bytes)", test_at.len());
 
     Timer::after(Duration::from_secs(1)).await;
 
