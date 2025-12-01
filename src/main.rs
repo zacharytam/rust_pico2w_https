@@ -414,83 +414,60 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
         let _ = data.push_str("\n=== HTTP TEST ===\n");
     }
 
-    let http_commands: &[&[u8]] = &[
-        b"AT+QHTTPCFG=\"contextid\",1\r\n",
-        b"AT+QHTTPCFG=\"responseheader\",1\r\n",
-        b"AT+QHTTPURL=23,80\r\n",
-    ];
-
-    for cmd in http_commands {
-        info!("Sending: {}", core::str::from_utf8(*cmd).unwrap_or(""));
-        let _ = tx.write_all(*cmd).await;
-
-        let mut tx_count = UART_TX_COUNT.lock().await;
-        *tx_count += cmd.len() as u32;
-        drop(tx_count);
-
-        Timer::after(Duration::from_millis(500)).await;
-
-        // Read response
-        let mut buf = [0u8; 512];
-        for _ in 0..5 {
-            match rx.read(&mut buf).await {
-                Ok(n) if n > 0 => {
-                    let mut rx_count = UART_RX_COUNT.lock().await;
-                    *rx_count += n as u32;
-                    drop(rx_count);
-
-                    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                        info!("HTTP cfg response: {}", s);
-                        let mut data = EC800K_DATA.lock().await;
-                        let _ = data.push_str("<< ");
-                        let _ = data.push_str(s);
-                    }
-                    break;
-                }
-                _ => {}
-            }
-            Timer::after(Duration::from_millis(100)).await;
-        }
-    }
-
-    // Send URL
-    info!("Sending URL: http://httpbin.org/get");
-    let url = b"http://httpbin.org/get";
-    let _ = tx.write_all(url).await;
+    // Configure HTTP context
+    info!("Configuring HTTP context");
+    let cfg_cmd = b"AT+QHTTPCFG=\"contextid\",1\r\n";
+    let _ = tx.write_all(cfg_cmd).await;
     {
         let mut tx_count = UART_TX_COUNT.lock().await;
-        *tx_count += url.len() as u32;
+        *tx_count += cfg_cmd.len() as u32;
     }
-    Timer::after(Duration::from_secs(2)).await;
+    Timer::after(Duration::from_secs(1)).await;
 
-    // Send GET request
-    info!("Sending HTTP GET");
-    let get_cmd = b"AT+QHTTPGET=60\r\n";
-    let _ = tx.write_all(get_cmd).await;
-    {
-        let mut tx_count = UART_TX_COUNT.lock().await;
-        *tx_count += get_cmd.len() as u32;
-    }
-
-    // Wait for response (up to 60 seconds)
-    let mut http_data = heapless::String::<2048>::new();
-    for _ in 0..600 {
-        let mut buf = [0u8; 512];
+    // Read response
+    let mut buf = [0u8; 256];
+    for _ in 0..10 {
         match rx.read(&mut buf).await {
             Ok(n) if n > 0 => {
                 let mut rx_count = UART_RX_COUNT.lock().await;
                 *rx_count += n as u32;
                 drop(rx_count);
-
                 if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                    info!("HTTP data: {}", s);
-                    let _ = http_data.push_str(s);
-
+                    info!("CFG response: {}", s);
                     let mut data = EC800K_DATA.lock().await;
                     let _ = data.push_str("<< ");
                     let _ = data.push_str(s);
+                }
+                break;
+            }
+            _ => {}
+        }
+        Timer::after(Duration::from_millis(100)).await;
+    }
 
-                    if s.contains("+QHTTPGET:") || s.contains("OK") {
+    // Set URL (length = 23 bytes)
+    info!("Setting URL");
+    let url_cmd = b"AT+QHTTPURL=23,30\r\n";
+    let _ = tx.write_all(url_cmd).await;
+    {
+        let mut tx_count = UART_TX_COUNT.lock().await;
+        *tx_count += url_cmd.len() as u32;
+    }
+    Timer::after(Duration::from_millis(500)).await;
+
+    // Wait for CONNECT
+    for _ in 0..10 {
+        match rx.read(&mut buf).await {
+            Ok(n) if n > 0 => {
+                let mut rx_count = UART_RX_COUNT.lock().await;
+                *rx_count += n as u32;
+                drop(rx_count);
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    info!("URL cmd response: {}", s);
+                    let mut data = EC800K_DATA.lock().await;
+                    let _ = data.push_str("<< ");
+                    let _ = data.push_str(s);
+                    if s.contains("CONNECT") {
                         break;
                     }
                 }
@@ -500,9 +477,78 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
         Timer::after(Duration::from_millis(100)).await;
     }
 
-    // Read the actual HTTP response body
-    if http_data.contains("+QHTTPGET: 0,200") {
-        info!("HTTP GET successful, reading body");
+    // Send URL
+    info!("Sending URL");
+    let url = b"http://httpbin.org/get";
+    let _ = tx.write_all(url).await;
+    {
+        let mut tx_count = UART_TX_COUNT.lock().await;
+        *tx_count += url.len() as u32;
+    }
+    Timer::after(Duration::from_secs(2)).await;
+
+    // Read OK response
+    for _ in 0..10 {
+        match rx.read(&mut buf).await {
+            Ok(n) if n > 0 => {
+                let mut rx_count = UART_RX_COUNT.lock().await;
+                *rx_count += n as u32;
+                drop(rx_count);
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    info!("URL response: {}", s);
+                    let mut data = EC800K_DATA.lock().await;
+                    let _ = data.push_str("<< ");
+                    let _ = data.push_str(s);
+                }
+            }
+            _ => {}
+        }
+        Timer::after(Duration::from_millis(100)).await;
+    }
+
+    // Execute GET request
+    info!("Executing HTTP GET");
+    let get_cmd = b"AT+QHTTPGET=60\r\n";
+    let _ = tx.write_all(get_cmd).await;
+    {
+        let mut tx_count = UART_TX_COUNT.lock().await;
+        *tx_count += get_cmd.len() as u32;
+    }
+
+    // Wait for GET response (can take up to 60 seconds)
+    let mut http_success = false;
+    for _ in 0..600 {
+        match rx.read(&mut buf).await {
+            Ok(n) if n > 0 => {
+                let mut rx_count = UART_RX_COUNT.lock().await;
+                *rx_count += n as u32;
+                drop(rx_count);
+
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    info!("GET response: {}", s);
+                    let mut data = EC800K_DATA.lock().await;
+                    let _ = data.push_str("<< ");
+                    let _ = data.push_str(s);
+
+                    if s.contains("+QHTTPGET: 0,200") || s.contains("+QHTTPGET:0,200") {
+                        http_success = true;
+                        break;
+                    }
+                    if s.contains("ERROR") || s.contains("+QHTTPGET:") {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Timer::after(Duration::from_millis(100)).await;
+    }
+
+    // Read HTTP response body
+    if http_success {
+        info!("HTTP GET successful, reading response body");
+        Timer::after(Duration::from_secs(1)).await;
+
         let read_cmd = b"AT+QHTTPREAD=80\r\n";
         let _ = tx.write_all(read_cmd).await;
         {
@@ -510,10 +556,10 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
             *tx_count += read_cmd.len() as u32;
         }
 
-        Timer::after(Duration::from_secs(2)).await;
+        Timer::after(Duration::from_millis(500)).await;
 
-        for _ in 0..100 {
-            let mut buf = [0u8; 512];
+        // Read response body
+        for _ in 0..200 {
             match rx.read(&mut buf).await {
                 Ok(n) if n > 0 => {
                     let mut rx_count = UART_RX_COUNT.lock().await;
@@ -521,7 +567,7 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
                     drop(rx_count);
 
                     if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                        info!("HTTP body: {}", s);
+                        info!("HTTP body chunk: {}", s);
 
                         let mut http_resp = HTTP_RESPONSE.lock().await;
                         let _ = http_resp.push_str(s);
@@ -530,21 +576,21 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
                         let _ = data.push_str("<< ");
                         let _ = data.push_str(s);
 
-                        if s.contains("OK") {
+                        if s.contains("OK") && http_resp.len() > 100 {
                             break;
                         }
                     }
                 }
                 _ => {}
             }
-            Timer::after(Duration::from_millis(100)).await;
+            Timer::after(Duration::from_millis(50)).await;
         }
 
         let mut status = EC800K_STATUS.lock().await;
         *status = "HTTP test complete!";
     } else {
         let mut status = EC800K_STATUS.lock().await;
-        *status = "HTTP test failed (check log)";
+        *status = "HTTP GET failed (timeout or error)";
     }
 
     // Continue reading responses and log to web interface
