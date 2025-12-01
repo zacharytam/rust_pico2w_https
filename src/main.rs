@@ -66,11 +66,14 @@ static EC800K_DATA: embassy_sync::mutex::Mutex<
     heapless::String<1024>,
 > = embassy_sync::mutex::Mutex::new(heapless::String::new());
 
+<<<<<<< HEAD
 static HTTP_RESPONSE: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     heapless::String<2048>,
 > = embassy_sync::mutex::Mutex::new(heapless::String::new());
 
+=======
+>>>>>>> 0743bbaa3648b2535a666a62628cf00ce91fea51
 static UART_TX_COUNT: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     u32,
@@ -158,7 +161,10 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let data = EC800K_DATA.lock().await;
             let tx_count = UART_TX_COUNT.lock().await;
             let rx_count = UART_RX_COUNT.lock().await;
+<<<<<<< HEAD
             let http_resp = HTTP_RESPONSE.lock().await;
+=======
+>>>>>>> 0743bbaa3648b2535a666a62628cf00ce91fea51
 
             // Build response string
             let mut response_str = heapless::String::<4096>::new();
@@ -201,11 +207,14 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
                     *rx_count,
                     method,
                     path,
+<<<<<<< HEAD
                     if http_resp.is_empty() {
                         "[No HTTP response yet - waiting for EC800K to fetch data...]"
                     } else {
                         http_resp.as_str()
                     },
+=======
+>>>>>>> 0743bbaa3648b2535a666a62628cf00ce91fea51
                     if data.is_empty() {
                         "[No data received - Check UART connection]"
                     } else {
