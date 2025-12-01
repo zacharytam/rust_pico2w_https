@@ -201,14 +201,11 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
                     *rx_count,
                     method,
                     path,
-<<<<<<< HEAD
                     if http_resp.is_empty() {
                         "[No HTTP response yet - waiting for EC800K to fetch data...]"
                     } else {
                         http_resp.as_str()
                     },
-=======
->>>>>>> 0743bbaa3648b2535a666a62628cf00ce91fea51
                     if data.is_empty() {
                         "[No data received - Check UART connection]"
                     } else {
