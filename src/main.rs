@@ -158,10 +158,7 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let data = EC800K_DATA.lock().await;
             let tx_count = UART_TX_COUNT.lock().await;
             let rx_count = UART_RX_COUNT.lock().await;
-<<<<<<< HEAD
             let http_resp = HTTP_RESPONSE.lock().await;
-=======
->>>>>>> 0743bbaa3648b2535a666a62628cf00ce91fea51
 
             // Build response string
             let mut response_str = heapless::String::<4096>::new();
