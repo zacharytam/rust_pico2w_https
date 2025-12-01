@@ -259,10 +259,30 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
             &mut *data,
             format_args!("Baud: {} | Pins: GP0(TX), GP1(RX)\n", baud_rate),
         );
-        let _ = data.push_str("Waiting 2s before testing...\n");
+        let _ = data.push_str("Waiting for modem to stabilize...\n");
     }
 
-    Timer::after(Duration::from_secs(2)).await;
+    // Wait longer for modem to boot and clear RDY messages
+    Timer::after(Duration::from_secs(5)).await;
+
+    // Clear any pending RDY messages
+    let mut buf = [0u8; 512];
+    for _ in 0..10 {
+        match rx.read(&mut buf).await {
+            Ok(n) if n > 0 => {
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    info!("Clearing boot messages: {}", s);
+                }
+            }
+            _ => break,
+        }
+        Timer::after(Duration::from_millis(100)).await;
+    }
+
+    {
+        let mut data = EC800K_DATA.lock().await;
+        let _ = data.push_str("Modem ready, starting init...\n");
+    }
 
     {
         let mut status = EC800K_STATUS.lock().await;
@@ -367,18 +387,19 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
     for cmd in init_commands {
         info!("Sending: {}", core::str::from_utf8(*cmd).unwrap_or(""));
         let _ = tx.write_all(*cmd).await;
-        Timer::after(Duration::from_secs(2)).await;
 
         {
             let mut tx_count = UART_TX_COUNT.lock().await;
             *tx_count += cmd.len() as u32;
         }
 
+        Timer::after(Duration::from_millis(500)).await;
+
         // Read response
         let mut buf = [0u8; 512];
         let mut total_read = 0;
         let mut got_response = false;
-        for _ in 0..10 {
+        for _ in 0..20 {
             match rx.read(&mut buf[total_read..]).await {
                 Ok(n) if n > 0 => {
                     total_read += n;
@@ -681,7 +702,7 @@ async fn main(spawner: Spawner) {
     let mut uart_config = UartConfig::default();
     // Manual testing: Try 115200, 230400, 460800, 921600
     // Change this value, rebuild, and see if EC800K responds in logs
-    uart_config.baudrate = 921600; // Change this to test: 230400, 460800, or 921600
+    uart_config.baudrate = 115200; // Lowered to 115200 for stability
 
     let uart = BufferedUart::new(
         p.UART0,
