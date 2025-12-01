@@ -71,6 +71,11 @@ static HTTP_RESPONSE: embassy_sync::mutex::Mutex<
     heapless::String<2048>,
 > = embassy_sync::mutex::Mutex::new(heapless::String::new());
 
+static HTTP_REQUEST_TRIGGER: embassy_sync::signal::Signal<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    bool,
+> = embassy_sync::signal::Signal::new();
+
 static UART_TX_COUNT: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     u32,
@@ -152,6 +157,12 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let path = parts[1];
             info!("Method: {}, Path: {}", method, path);
 
+            // Check if trigger button was pressed
+            if path.contains("/trigger") {
+                info!("HTTP request triggered!");
+                HTTP_REQUEST_TRIGGER.signal(true);
+            }
+
             // Get EC800K status
             let status = EC800K_STATUS.lock().await;
             let baud = EC800K_BAUD.lock().await;
@@ -179,6 +190,7 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
                     <p><b>UART TX:</b> {} bytes | <b>RX:</b> {} bytes</p>\
                     <p><b>Request:</b> {} {}</p>\
                     <p><b>Network:</b> AP Mode - 192.168.4.1</p>\
+                    <form action='/trigger' method='get'><button type='submit' style='padding:10px 20px;font-size:16px;background:#4CAF50;color:white;border:none;cursor:pointer'>Fetch httpbin.org/get</button></form>\
                     <hr>\
                     <h2>HTTP Test (httpbin.org/get):</h2>\
                     <pre style='background:#e8f4f8;padding:10px;overflow:auto;max-height:300px;font-size:12px'>{}</pre>\
@@ -401,13 +413,17 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
 
     {
         let mut status = EC800K_STATUS.lock().await;
-        *status = "Init OK - Testing HTTP...";
+        *status = "Ready - Click button to test";
     }
 
-    info!("EC800K initialization complete - Testing TCP connection");
+    info!("EC800K initialization complete - Waiting for button press");
 
-    // Test TCP connection to httpbin.org
-    Timer::after(Duration::from_secs(2)).await;
+    // Wait for user to trigger HTTP request
+    info!("Waiting for HTTP request trigger...");
+    HTTP_REQUEST_TRIGGER.wait().await;
+    info!("HTTP request triggered by user!");
+
+    Timer::after(Duration::from_millis(500)).await;
 
     {
         let mut data = EC800K_DATA.lock().await;
@@ -428,32 +444,62 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx, baud_rate: u3
         *tx_count += tcp_open.len() as u32;
     }
 
-    Timer::after(Duration::from_secs(5)).await;
-
-    // Read connection response
+    // Read initial OK response
     let mut buf = [0u8; 512];
-    let mut connected = false;
-    for _ in 0..50 {
+    Timer::after(Duration::from_millis(500)).await;
+
+    for _ in 0..5 {
         match rx.read(&mut buf).await {
             Ok(n) if n > 0 => {
                 let mut rx_count = UART_RX_COUNT.lock().await;
                 *rx_count += n as u32;
                 drop(rx_count);
                 if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                    info!("TCP open response: {}", s);
+                    info!("Initial response: {}", s);
+                    let mut data = EC800K_DATA.lock().await;
+                    let _ = data.push_str("<< ");
+                    let _ = data.push_str(s);
+                }
+                break;
+            }
+            _ => {}
+        }
+        Timer::after(Duration::from_millis(100)).await;
+    }
+
+    // Now wait for +QIOPEN URC (can take several seconds)
+    info!("Waiting for +QIOPEN connection result...");
+    Timer::after(Duration::from_secs(3)).await;
+
+    let mut connected = false;
+    for _ in 0..100 {
+        match rx.read(&mut buf).await {
+            Ok(n) if n > 0 => {
+                let mut rx_count = UART_RX_COUNT.lock().await;
+                *rx_count += n as u32;
+                drop(rx_count);
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    info!("TCP connection status: {}", s);
                     let mut data = EC800K_DATA.lock().await;
                     let _ = data.push_str("<< ");
                     let _ = data.push_str(s);
 
-                    if s.contains("+QIOPEN: 0,0") || s.contains("CONNECT") {
+                    // +QIOPEN: 0,0 means context 0, error 0 (success)
+                    if s.contains("+QIOPEN: 0,0") {
                         connected = true;
+                        info!("TCP connection established!");
+                        break;
+                    }
+                    // Check for error codes
+                    if s.contains("+QIOPEN:") && !s.contains(",0") {
+                        info!("TCP connection failed");
                         break;
                     }
                 }
             }
             _ => {}
         }
-        Timer::after(Duration::from_millis(100)).await;
+        Timer::after(Duration::from_millis(200)).await;
     }
 
     if !connected {
