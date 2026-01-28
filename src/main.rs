@@ -23,12 +23,12 @@ use {defmt_rtt as _, panic_probe as _};
 #[unsafe(link_section = ".bi_entries")]
 #[used]
 pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
-    embassy_rp::binary_info::EntryAddr::rp_program_name(c"Pico2W LTE Proxy"),
-    embassy_rp::binary_info::EntryAddr::rp_program_description(
+    embassy_rp::binary_info::rp_program_name!(c"Pico2W LTE Proxy"),
+    embassy_rp::binary_info::rp_program_description!(
         c"WiFi AP + LTE HTTP Proxy via EC800K module"
     ),
     embassy_rp::binary_info::rp_cargo_version!(),
-    embassy_rp::binary_info::EntryAddr::rp_program_build_attribute(),
+    embassy_rp::binary_info::rp_program_build_attribute!(),
 ];
 
 bind_interrupts!(struct Irqs {
@@ -192,9 +192,11 @@ async fn execute_at_command(uart: &mut BufferedUart, cmd: &str) -> UartResponse 
         }
     }
     
+    let success = response.contains("OK");
+    
     UartResponse {
         data: response,
-        success: response.contains("OK"),
+        success,
     }
 }
 
@@ -614,13 +616,15 @@ async fn http_server_task(stack: &'static embassy_net::Stack<'static>) {
 fn url_decode(input: &str) -> String<128> {
     let mut result = String::<128>::new();
     let mut chars = input.chars();
+    let mut temp_buf = [0u8; 2];
     
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex1 = chars.next().unwrap_or('0');
             let hex2 = chars.next().unwrap_or('0');
-            let hex_str = [hex1, hex2];
-            if let Ok(byte) = u8::from_str_radix(&String::from_iter(hex_str), 16) {
+            temp_buf[0] = hex1 as u8;
+            temp_buf[1] = hex2 as u8;
+            if let Ok(byte) = u8::from_str_radix(core::str::from_utf8(&temp_buf).unwrap_or("00"), 16) {
                 let _ = result.push(byte as char);
             }
         } else if c == '+' {
@@ -693,7 +697,7 @@ fn extract_json(data: &str) -> String<8192> {
 
 fn format_main_page() -> String<8192> {
     let mut response = String::new();
-    let _ = FmtWrite::write_fmt(&mut response, format_args!(
+    let _ = write!(response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
         <!DOCTYPE html>\
         <html>\
@@ -716,7 +720,7 @@ fn format_main_page() -> String<8192> {
             <div class=\"container\">\
                 <h1>📶 Pico 2W LTE Proxy</h1>\
                 <p>Control panel for EC800K LTE module via WiFi</p>\
-                
+                \
                 <div class=\"section\">\
                     <h2>🛠️ AT Command Testing</h2>\
                     <p>Send AT commands directly to the EC800K module:</p>\
@@ -726,14 +730,14 @@ fn format_main_page() -> String<8192> {
                     </form>\
                     <p><a href=\"/atcmd\" class=\"button\">📝 AT Command Form</a></p>\
                 </div>\
-                
+                \
                 <div class=\"section\">\
                     <h2>🌐 HTTP Testing</h2>\
                     <p>Test HTTP connectivity with HttpBin.org:</p>\
                     <a href=\"/httpbin\" class=\"button\">📡 Test HttpBin.org</a>\
                     <p>Fetches data from http://httpbin.org/get to verify LTE connection.</p>\
                 </div>\
-                
+                \
                 <div class=\"section\">\
                     <h2>🔗 Custom Proxy</h2>\
                     <p>Proxy any HTTP website through LTE:</p>\
@@ -742,7 +746,7 @@ fn format_main_page() -> String<8192> {
                         <button type=\"submit\" style=\"padding: 8px 15px; background: #007acc; color: white; border: none; border-radius: 3px;\">Go</button>\
                     </form>\
                 </div>\
-                
+                \
                 <div class=\"section\">\
                     <h2>📊 System Info</h2>\
                     <ul>\
@@ -757,13 +761,13 @@ fn format_main_page() -> String<8192> {
         </body>\
         </html>",
         WIFI_SSID, WIFI_PASSWORD
-    ));
+    );
     response
 }
 
 fn format_at_command_form(cmd: &str) -> String<8192> {
     let mut response = String::new();
-    let _ = FmtWrite::write_fmt(&mut response, format_args!(
+    let _ = write!(response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
         <!DOCTYPE html>\
         <html>\
@@ -796,7 +800,7 @@ fn format_at_command_form(cmd: &str) -> String<8192> {
         </body>\
         </html>",
         cmd
-    ));
+    );
     response
 }
 
@@ -806,24 +810,24 @@ fn format_at_command_result(cmd: &str, result: &UartResponse) -> String<8192> {
     let status_class = if result.success { "success" } else { "error" };
     let status_text = if result.success { "✅ Success" } else { "❌ Error" };
     
-    let _ = FmtWrite::write_fmt(&mut response, format_args!(
+    let _ = write!(response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
         <!DOCTYPE html>\
         <html>\
         <head>\
             <title>AT Command Result - Pico LTE</title>\
             <style>\
-                body {{ font-family: monospace; margin: 20px; background: #1e1e1e; color: #d4d4d4; }}\
-                .container {{ max-width: 800px; margin: 0 auto; }}\
-                h1 {{ color: #569cd6; }}\
-                .status {{ font-size: 1.2em; margin: 20px 0; }}\
-                .success {{ color: #4ec9b0; }}\
-                .error {{ color: #f48771; }}\
-                .cmd {{ background: #2d2d2d; padding: 10px; border-left: 4px solid #007acc; margin: 20px 0; }}\
-                .response {{ background: #0e2941; padding: 15px; border-radius: 5px; margin: 20px 0; white-space: pre-wrap; overflow-x: auto; }}\
-                .back {{ margin-top: 20px; display: inline-block; color: #569cd6; text-decoration: none; }}\
-                form {{ margin: 20px 0; }}\
-                textarea {{ width: 100%; height: 100px; background: #252525; color: #d4d4d4; border: 1px solid #3e3e3e; padding: 10px; font-family: monospace; }}\
+                body {{ font-family: monospace; margin: 20px; background: #1e1e1e; color: #d4d4d4; }}\\
+                .container {{ max-width: 800px; margin: 0 auto; }}\\
+                h1 {{ color: #569cd6; }}\\
+                .status {{ font-size: 1.2em; margin: 20px 0; }}\\
+                .success {{ color: #4ec9b0; }}\\
+                .error {{ color: #f48771; }}\\
+                .cmd {{ background: #2d2d2d; padding: 10px; border-left: 4px solid #007acc; margin: 20px 0; }}\\
+                .response {{ background: #0e2941; padding: 15px; border-radius: 5px; margin: 20px 0; white-space: pre-wrap; overflow-x: auto; }}\\
+                .back {{ margin-top: 20px; display: inline-block; color: #569cd6; text-decoration: none; }}\\
+                form {{ margin: 20px 0; }}\\
+                textarea {{ width: 100%; height: 100px; background: #252525; color: #d4d4d4; border: 1px solid #3e3e3e; padding: 10px; font-family: monospace; }}\\
                 button {{ background: #007acc; color: white; border: none; padding: 10px 20px; cursor: pointer; }}\
             </style>\
         </head>\
@@ -848,25 +852,25 @@ fn format_at_command_result(cmd: &str, result: &UartResponse) -> String<8192> {
         </body>\
         </html>",
         status_class, status_text, cmd, result.data
-    ));
+    );
     response
 }
 
 fn format_httpbin_response(json_content: &str) -> String<8192> {
     let mut response = String::new();
-    let _ = FmtWrite::write_fmt(&mut response, format_args!(
+    let _ = write!(response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
         <!DOCTYPE html>\
         <html>\
         <head>\
             <title>HttpBin Test - Pico LTE</title>\
             <style>\
-                body {{ font-family: Arial, sans-serif; margin: 40px; background: #f0f0f0; }}\
-                .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}\
-                h1 {{ color: #333; border-bottom: 2px solid #28a745; padding-bottom: 10px; }}\
-                .success {{ color: #28a745; background: #d4edda; padding: 10px; border-radius: 5px; margin: 20px 0; }}\
-                pre {{ background: #f8f8f8; padding: 15px; border-radius: 5px; overflow-x: auto; font-family: 'Courier New', monospace; }}\
-                .back {{ display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007acc; color: white; text-decoration: none; border-radius: 5px; }}\
+                body {{ font-family: Arial, sans-serif; margin: 40px; background: #f0f0f0; }}\\
+                .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}\\
+                h1 {{ color: #333; border-bottom: 2px solid #28a745; padding-bottom: 10px; }}\\
+                .success {{ color: #28a745; background: #d4edda; padding: 10px; border-radius: 5px; margin: 20px 0; }}\\
+                pre {{ background: #f8f8f8; padding: 15px; border-radius: 5px; overflow-x: auto; font-family: 'Courier New', monospace; }}\\
+                .back {{ display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007acc; color: white; text-decoration: none; border-radius: 5px; }}\\
                 .info {{ background: #d1ecf1; color: #0c5460; padding: 10px; border-radius: 5px; margin: 10px 0; }}\
             </style>\
         </head>\
@@ -885,22 +889,22 @@ fn format_httpbin_response(json_content: &str) -> String<8192> {
         </body>\
         </html>",
         json_content
-    ));
+    );
     response
 }
 
 fn format_http_response(content: &str) -> String<8192> {
     let mut response = String::new();
-    let _ = FmtWrite::write_fmt(&mut response, format_args!(
+    let _ = write!(response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
         content
-    ));
+    );
     response
 }
 
 fn format_error_response(error: &str) -> String<8192> {
     let mut response = String::new();
-    let _ = FmtWrite::write_fmt(&mut response, format_args!(
+    let _ = write!(response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
         <!DOCTYPE html>\
         <html>\
@@ -914,7 +918,7 @@ fn format_error_response(error: &str) -> String<8192> {
         <a href=\"/\">← Back to Main</a>\
         </body></html>",
         error
-    ));
+    );
     response
 }
 
