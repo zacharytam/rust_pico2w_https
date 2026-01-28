@@ -377,25 +377,36 @@ async fn http_server_task(stack: &'static embassy_net::Stack<'static>) {
 
     // Wait for network link to be up
     info!("Waiting for network link...");
+    let mut link_wait_count = 0;
     loop {
         if stack.is_link_up() {
             info!("Network link is UP!");
             break;
+        }
+        link_wait_count += 1;
+        if link_wait_count % 10 == 0 {
+            info!("Still waiting for network link... ({} attempts)", link_wait_count);
         }
         Timer::after(Duration::from_millis(100)).await;
     }
 
     // Wait for stack to be configured
     info!("Waiting for network config...");
+    let mut config_wait_count = 0;
     loop {
         if stack.is_config_up() {
             info!("Network config is UP!");
             break;
         }
+        config_wait_count += 1;
+        if config_wait_count % 10 == 0 {
+            info!("Still waiting for network config... ({} attempts)", config_wait_count);
+        }
         Timer::after(Duration::from_millis(100)).await;
     }
 
-    Timer::after(Duration::from_secs(1)).await;
+    // Extra wait for everything to settle
+    Timer::after(Duration::from_secs(2)).await;
 
     info!("==================================================");
     info!("HTTP SERVER READY on 192.168.4.1:80");
@@ -413,51 +424,36 @@ async fn http_server_task(stack: &'static embassy_net::Stack<'static>) {
         socket.set_timeout(Some(Duration::from_secs(10)));
 
         info!("🔵 Listening on TCP port 80... (connections: {})", connection_count);
-        if let Err(e) = socket.accept(80).await {
-            warn!("❌ Accept error: {:?}", e);
-            Timer::after(Duration::from_millis(100)).await;
-            continue;
-        }
-
-        connection_count += 1;
-        info!("✅ Client connected! (connection #{})", connection_count);
-
-        // Send initial response immediately
-        info!("Sending HTTP response...");
-        let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 27\r\nConnection: close\r\n\r\n<h1>Pico 2W Works!</h1>\r\n";
-
-        match socket.write_all(response).await {
+        match socket.accept(80).await {
             Ok(_) => {
-                info!("✅ Response written");
+                info!("✅ Socket accepted connection");
             }
             Err(e) => {
-                warn!("❌ Write error: {:?}", e);
+                warn!("❌ Accept error: {:?}", e);
                 Timer::after(Duration::from_millis(100)).await;
                 continue;
             }
         }
 
-        match socket.flush().await {
-            Ok(_) => {
-                info!("✅ Response flushed");
-            }
-            Err(e) => {
-                warn!("❌ Flush error: {:?}", e);
-            }
-        }
+        connection_count += 1;
+        info!("✅ Client connected! (connection #{})", connection_count);
 
-        info!("✅ Response sent successfully to client");
-        Timer::after(Duration::from_millis(500)).await;
-
-        // Now try to read the request (non-blocking)
+        // Try to read the request first
         let mut request_buf = [0u8; 1024];
         let mut total_read = 0;
 
+        // Set a shorter timeout for reading request
+        socket.set_timeout(Some(Duration::from_secs(5)));
+
         loop {
             match socket.read(&mut request_buf[total_read..]).await {
-                Ok(0) => break,
+                Ok(0) => {
+                    info!("Client closed connection (read 0 bytes)");
+                    break;
+                }
                 Ok(n) => {
                     total_read += n;
+                    info!("Read {} bytes, total: {}", n, total_read);
                     if total_read >= request_buf.len()
                         || request_buf[..total_read]
                             .windows(4)
@@ -466,27 +462,37 @@ async fn http_server_task(stack: &'static embassy_net::Stack<'static>) {
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    info!("Read error or timeout: {:?}", e);
+                    break;
+                }
             }
         }
 
         if total_read == 0 {
-            info!("Client closed connection");
+            info!("No request data, sending welcome page");
+            let response = format_main_page();
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.flush().await;
+            socket.close();
+            Timer::after(Duration::from_millis(100)).await;
             continue;
         }
 
         let request_str = match core::str::from_utf8(&request_buf[..total_read]) {
-            Ok(s) => s,
+            Ok(s) => {
+                info!("Request received ({} bytes): {}", total_read, s.split("\r\n").next().unwrap_or(""));
+                s
+            }
             Err(_) => {
-                warn!("Invalid UTF-8");
+                warn!("Invalid UTF-8 in request");
+                let response = format_error_response("Invalid UTF-8 in request");
+                let _ = socket.write_all(response.as_bytes()).await;
+                socket.close();
+                Timer::after(Duration::from_millis(100)).await;
                 continue;
             }
         };
-
-        info!(
-            "Request: {}",
-            request_str.split("\r\n").next().unwrap_or("")
-        );
 
         // Parse request
         let response = if request_str.contains("/atcmd") {
@@ -604,11 +610,27 @@ async fn http_server_task(stack: &'static embassy_net::Stack<'static>) {
         };
 
         // Send response
-        if let Err(e) = socket.write_all(response.as_bytes()).await {
-            warn!("Write error: {:?}", e);
+        info!("Sending response ({} bytes)...", response.len());
+        match socket.write_all(response.as_bytes()).await {
+            Ok(_) => {
+                info!("✅ Response written");
+            }
+            Err(e) => {
+                warn!("❌ Write error: {:?}", e);
+            }
+        }
+
+        match socket.flush().await {
+            Ok(_) => {
+                info!("✅ Response flushed");
+            }
+            Err(e) => {
+                warn!("❌ Flush error: {:?}", e);
+            }
         }
 
         socket.close();
+        info!("✅ Connection closed");
         Timer::after(Duration::from_millis(100)).await;
     }
 }
@@ -777,13 +799,13 @@ fn format_at_command_form(cmd: &str) -> String<8192> {
                 body {{ font-family: monospace; margin: 20px; background: #1e1e1e; color: #d4d4d4; }}\
                 .container {{ max-width: 800px; margin: 0 auto; }}\
                 h1 {{ color: #569cd6; }}\
-                form {{ margin: 20px 0; }}\
-                textarea {{ width: 100%; height: 100px; background: #252525; color: #d4d4d4; border: 1px solid #3e3e3e; padding: 10px; font-family: monospace; }}\
-                button {{ background: #007acc; color: white; border: none; padding: 10px 20px; cursor: pointer; }}\
-                button:hover {{ background: #005fa3; }}\
-                .response {{ background: #0e2941; padding: 15px; border-radius: 5px; margin: 20px 0; white-space: pre-wrap; overflow-x: auto; }}\
-                .back {{ margin-top: 20px; display: inline-block; color: #569cd6; text-decoration: none; }}\
-                .success {{ color: #4ec9b0; }}\
+                form {{ margin: 20px 0; }}\\
+                textarea {{ width: 100%; height: 100px; background: #252525; color: #d4d4d4; border: 1px solid #3e3e3e; padding: 10px; font-family: monospace; }}\\
+                button {{ background: #007acc; color: white; border: none; padding: 10px 20px; cursor: pointer; }}\\
+                button:hover {{ background: #005fa3; }}\\
+                .response {{ background: #0e2941; padding: 15px; border-radius: 5px; margin: 20px 0; white-space: pre-wrap; overflow-x: auto; }}\\
+                .back {{ margin-top: 20px; display: inline-block; color: #569cd6; text-decoration: none; }}\\
+                .success {{ color: #4ec9b0; }}\\
                 .error {{ color: #f48771; }}\
             </style>\
         </head>\
@@ -922,27 +944,6 @@ fn format_error_response(error: &str) -> String<8192> {
     response
 }
 
-fn format_connection_number(num: u32, buf: &mut [u8]) -> &[u8] {
-    let mut n = num;
-    let mut i = 0;
-    if n == 0 {
-        buf[0] = b'0';
-        return &buf[0..1];
-    }
-    let mut temp = [0u8; 10];
-    let mut j = 0;
-    while n > 0 {
-        temp[j] = b'0' + (n % 10) as u8;
-        n /= 10;
-        j += 1;
-    }
-    for k in 0..j {
-        buf[i] = temp[j - 1 - k];
-        i += 1;
-    }
-    &buf[0..i]
-}
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -998,12 +999,22 @@ async fn main(spawner: Spawner) {
     // Set power management mode
     control.set_power_management(cyw43::PowerManagementMode::PowerSave).await;
 
-    Timer::after(Duration::from_millis(500)).await;
+    Timer::after(Duration::from_secs(2)).await;
     info!("Starting AP mode: SSID={}", WIFI_SSID);
-    control.start_ap_open(WIFI_SSID, 5).await;
+    match control.start_ap_open(WIFI_SSID, 5).await {
+        Ok(_) => info!("✅ WiFi AP started successfully!"),
+        Err(e) => warn!("❌ WiFi AP failed to start: {:?}", e),
+    }
 
-    info!("WiFi AP started successfully!");
-    Timer::after(Duration::from_millis(500)).await;
+    Timer::after(Duration::from_secs(3)).await;
+
+    // Check if WiFi is up
+    info!("Checking WiFi status...");
+    for i in 0..10 {
+        let status = control.get_state().await;
+        info!("WiFi status [{}]: {:?}", i, status);
+        Timer::after(Duration::from_millis(500)).await;
+    }
 
     // Configure network stack with static IP
     info!("Configuring network stack...");
