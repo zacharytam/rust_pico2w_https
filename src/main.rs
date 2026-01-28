@@ -697,7 +697,7 @@ fn extract_json(data: &str) -> String<8192> {
 
 fn format_main_page() -> String<8192> {
     let mut response = String::new();
-    let _ = write!(response,
+    let _ = write!(&mut response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
         <!DOCTYPE html>\
         <html>\
@@ -767,7 +767,7 @@ fn format_main_page() -> String<8192> {
 
 fn format_at_command_form(cmd: &str) -> String<8192> {
     let mut response = String::new();
-    let _ = write!(response,
+    let _ = write!(&mut response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
         <!DOCTYPE html>\
         <html>\
@@ -810,7 +810,7 @@ fn format_at_command_result(cmd: &str, result: &UartResponse) -> String<8192> {
     let status_class = if result.success { "success" } else { "error" };
     let status_text = if result.success { "✅ Success" } else { "❌ Error" };
     
-    let _ = write!(response,
+    let _ = write!(&mut response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
         <!DOCTYPE html>\
         <html>\
@@ -858,7 +858,7 @@ fn format_at_command_result(cmd: &str, result: &UartResponse) -> String<8192> {
 
 fn format_httpbin_response(json_content: &str) -> String<8192> {
     let mut response = String::new();
-    let _ = write!(response,
+    let _ = write!(&mut response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
         <!DOCTYPE html>\
         <html>\
@@ -895,7 +895,7 @@ fn format_httpbin_response(json_content: &str) -> String<8192> {
 
 fn format_http_response(content: &str) -> String<8192> {
     let mut response = String::new();
-    let _ = write!(response,
+    let _ = write!(&mut response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
         content
     );
@@ -904,7 +904,7 @@ fn format_http_response(content: &str) -> String<8192> {
 
 fn format_error_response(error: &str) -> String<8192> {
     let mut response = String::new();
-    let _ = write!(response,
+    let _ = write!(&mut response,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
         <!DOCTYPE html>\
         <html>\
