@@ -30,12 +30,12 @@ async fn cyw43_task(
 }
 
 #[embassy_executor::task]
-async fn net_task(runner: &'static mut embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
+async fn net_task(runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
     runner.run().await
 }
 
 #[embassy_executor::task]
-async fn http_server_task(stack: &'static embassy_net::Stack<'static>) {
+async fn http_server_task(stack: embassy_net::Stack<'static>) {
     info!("HTTP server starting...");
     
     // Wait for network
@@ -61,7 +61,8 @@ async fn http_server_task(stack: &'static embassy_net::Stack<'static>) {
     let mut tx_buffer = [0; 512];
     
     loop {
-        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+        // Pass stack by value (not reference)
+        let mut socket = TcpSocket::new(&stack, &mut rx_buffer, &mut tx_buffer);
         
         if let Err(e) = socket.accept(80).await {
             warn!("Accept error: {:?}", e);
@@ -116,7 +117,9 @@ async fn main(spawner: Spawner) {
     let state = STATE.init(cyw43::State::new());
     
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
-    spawner.spawn(cyw43_task(runner));
+    
+    // Unwrap the Result from the task macro
+    spawner.spawn(cyw43_task(runner).expect("Failed to spawn cyw43 task"));
     
     control.init(clm).await;
     
@@ -145,14 +148,9 @@ async fn main(spawner: Spawner) {
         embassy_rp::clocks::RoscRng.next_u64()
     );
     
-    static STACK_STORAGE: StaticCell<embassy_net::Stack<'static>> = StaticCell::new();
-    let stack = STACK_STORAGE.init(stack);
-    
-    static RUNNER_STORAGE: StaticCell<embassy_net::Runner<'static, cyw43::NetDriver<'static>>> = StaticCell::new();
-    let runner = RUNNER_STORAGE.init(runner);
-    
-    spawner.spawn(net_task(runner));
-    spawner.spawn(http_server_task(stack));
+    // Spawn tasks and unwrap the Results
+    spawner.spawn(net_task(runner).expect("Failed to spawn net task"));
+    spawner.spawn(http_server_task(stack).expect("Failed to spawn HTTP server task"));
     
     info!("=== System Ready ===");
     info!("Connect to WiFi: {}", WIFI_SSID);
