@@ -3,7 +3,7 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_net::{Config, StackResources, tcp::TcpSocket};
+use embassy_net::{Config, StackResources};
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0};
@@ -18,6 +18,7 @@ bind_interrupts!(struct Irqs {
 });
 
 use cyw43_pio::{PioSpi, RM2_CLOCK_DIVIDER};
+use picoserve::{response::Html, Router};
 
 const WIFI_SSID: &str = "PicoTest";
 const WIFI_PASSWORD: &str = "test1234";
@@ -45,37 +46,23 @@ async fn http_server_task(stack: &'static embassy_net::Stack<'static>) {
     info!("[HTTP] Link up: {}", stack.is_link_up());
     info!("[HTTP] Config up: {}", stack.is_config_up());
     
-    let mut rx_buffer = [0; 1024];
-    let mut tx_buffer = [0; 1024];
+    let router = Router::new().route("/", |_| async { Html("<h1>Hello from Pico with picoserve!</h1>") });
+    let config = picoserve::Config::new(picoserve::Timeouts {
+        start_read_request: Some(Duration::from_secs(5)),
+        read_request: Some(Duration::from_secs(1)),
+        write: Some(Duration::from_secs(1)),
+    })
+    .keep_connection_alive();
     
-    // Try to listen on port 80
+    let server = picoserve::Server::new(stack, config, router);
+    
+    info!("HTTP Server Ready on 192.168.4.1:80");
+    
     loop {
-        info!("[HTTP] Creating socket...");
-        // NOTE: Use *stack to dereference the reference
-        let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
-        
-        info!("[HTTP] Attempting to listen on port 80...");
-        match socket.accept(80).await {
-            Ok(_) => {
-                info!("✅ [HTTP] Client connected!");
-                
-                // Send HTTP response
-                let response = b"HTTP/1.0 200 OK\r\n\
-                               Content-Type: text/html\r\n\
-                               Connection: close\r\n\
-                               \r\n\
-                               <h1>Hello from Pico 2W!</h1>\r\n";
-                
-                match socket.write_all(response).await {
-                    Ok(_) => info!("✅ [HTTP] Response sent"),
-                    Err(e) => warn!("❌ [HTTP] Write error: {:?}", e),
-                }
-                
-                socket.close();
-                info!("[HTTP] Connection closed");
-            }
+        match server.run().await {
+            Ok(_) => info!("Server completed (shouldn't happen)"),
             Err(e) => {
-                warn!("❌ [HTTP] Accept failed: {:?}", e);
+                warn!("Server error: {:?}", e);
                 Timer::after(Duration::from_secs(1)).await;
             }
         }
@@ -86,7 +73,7 @@ async fn http_server_task(stack: &'static embassy_net::Stack<'static>) {
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     
-    info!("=== Pico 2W HTTP Test ===");
+    info!("=== Pico 2W HTTP Test (with picoserve) ===");
     
     // Initialize WiFi
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
@@ -146,8 +133,6 @@ async fn main(spawner: Spawner) {
     
     info!("=== System Ready ===");
     info!("WiFi: {} / {}", WIFI_SSID, WIFI_PASSWORD);
-    info!("Client must use static IP: 192.168.4.2/24");
-    info!("Gateway: 192.168.4.1");
     info!("Test URL: http://192.168.4.1");
     
     // Blink LED to show status
@@ -156,9 +141,5 @@ async fn main(spawner: Spawner) {
         control.gpio_set(0, status % 2 == 0).await;
         Timer::after(Duration::from_secs(1)).await;
         status += 1;
-        
-        if status % 5 == 0 {
-            info!("[Status] Still running...");
-        }
     }
 }
