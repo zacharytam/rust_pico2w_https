@@ -116,14 +116,14 @@ async fn main(spawner: Spawner) {
     let state = STATE.init(cyw43::State::new());
     
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
-    spawner.spawn(cyw43_task(runner)).unwrap();
+    spawner.spawn(cyw43_task(runner));
     
     control.init(clm).await;
     
     // Start AP with WPA2 (more reliable than open)
     Timer::after(Duration::from_secs(1)).await;
     info!("Starting AP: {}", WIFI_SSID);
-    control.start_ap(WIFI_SSID, WIFI_PASSWORD, 11).await;
+    control.start_ap_wpa2(WIFI_SSID, WIFI_PASSWORD, 11).await;
     info!("AP Started!");
     
     Timer::after(Duration::from_secs(2)).await;
@@ -151,14 +151,13 @@ async fn main(spawner: Spawner) {
     static RUNNER_STORAGE: StaticCell<embassy_net::Runner<'static, cyw43::NetDriver<'static>>> = StaticCell::new();
     let runner = RUNNER_STORAGE.init(runner);
     
-    spawner.spawn(net_task(runner)).unwrap();
-    
-    spawner.spawn(http_server_task(stack)).unwrap();
+    spawner.spawn(net_task(runner));
+    spawner.spawn(http_server_task(stack));
     
     info!("=== System Ready ===");
     info!("Connect to WiFi: {}", WIFI_SSID);
     info!("Password: {}", WIFI_PASSWORD);
-    info("Visit: http://192.168.4.1");
+    info!("Visit: http://192.168.4.1");
     
     // Simple LED blink
     loop {
