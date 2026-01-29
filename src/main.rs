@@ -557,7 +557,9 @@ async fn main(spawner: Spawner) {
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
-    spawner.spawn(cyw43_task(runner)).unwrap();
+    
+    // FIXED: Use expect() to unwrap the Result and pass SpawnToken to spawn()
+    spawner.spawn(cyw43_task(runner).expect("Failed to spawn cyw43 task"));
 
     control.init(clm).await;
     control
@@ -588,7 +590,8 @@ async fn main(spawner: Spawner) {
 
     let (uart_tx, uart_rx) = uart.split();
 
-    spawner.spawn(uart_task(uart_tx, uart_rx)).unwrap();
+    // FIXED: Use expect() to unwrap the Result
+    spawner.spawn(uart_task(uart_tx, uart_rx).expect("Failed to spawn uart task"));
 
     // Configure network stack for AP mode with static IP
     let config = Config::ipv4_static(embassy_net::StaticConfigV4 {
@@ -609,7 +612,8 @@ async fn main(spawner: Spawner) {
     );
     let stack = STACK.init(stack);
 
-    spawner.spawn(net_task(runner)).unwrap();
+    // FIXED: Use expect() to unwrap the Result
+    spawner.spawn(net_task(runner).expect("Failed to spawn net task"));
 
     // Start WiFi AP
     info!("Starting WiFi AP...");
@@ -624,7 +628,8 @@ async fn main(spawner: Spawner) {
 
     // Spawn HTTP server
     info!("Starting HTTP server on port 80...");
-    spawner.spawn(http_server_task(stack)).unwrap();
+    // FIXED: Use expect() to unwrap the Result
+    spawner.spawn(http_server_task(stack).expect("Failed to spawn HTTP server task"));
     info!("HTTP server task spawned");
 
     info!("==========================================");
