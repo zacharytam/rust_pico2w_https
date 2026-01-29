@@ -30,7 +30,7 @@ async fn cyw43_task(
 }
 
 #[embassy_executor::task]
-async fn net_task(runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
+async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
     runner.run().await
 }
 
@@ -57,12 +57,13 @@ async fn http_server_task(stack: embassy_net::Stack<'static>) {
     
     info!("HTTP Server Ready on 192.168.4.1:80");
     
-    let mut rx_buffer = [0; 512];
-    let mut tx_buffer = [0; 512];
-    
     loop {
-        // Pass stack by value (not reference)
-        let mut socket = TcpSocket::new(&stack, &mut rx_buffer, &mut tx_buffer);
+        // Create fresh buffers for each connection
+        let mut rx_buffer = [0; 512];
+        let mut tx_buffer = [0; 512];
+        
+        // Pass stack by value
+        let mut socket = TcpSocket::new(stack.clone(), &mut rx_buffer, &mut tx_buffer);
         
         if let Err(e) = socket.accept(80).await {
             warn!("Accept error: {:?}", e);
