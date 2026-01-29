@@ -35,57 +35,49 @@ async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'sta
 }
 
 #[embassy_executor::task]
-async fn http_server_task(stack: embassy_net::Stack<'static>) {
-    info!("HTTP server starting...");
+async fn http_server_task(stack: &'static embassy_net::Stack<'static>) {
+    info!("[HTTP] Task starting...");
     
-    // Wait for network
+    // Simple wait for network
+    Timer::after(Duration::from_secs(5)).await;
+    
+    info!("[HTTP] Checking network status...");
+    info!("[HTTP] Link up: {}", stack.is_link_up());
+    info!("[HTTP] Config up: {}", stack.is_config_up());
+    
+    let mut rx_buffer = [0; 1024];
+    let mut tx_buffer = [0; 1024];
+    
+    // Try to listen on port 80
     loop {
-        if stack.is_link_up() {
-            info!("Network link is UP!");
-            break;
+        info!("[HTTP] Creating socket...");
+        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+        
+        info!("[HTTP] Attempting to listen on port 80...");
+        match socket.accept(80).await {
+            Ok(_) => {
+                info!("✅ [HTTP] Client connected!");
+                
+                // Send HTTP response
+                let response = b"HTTP/1.0 200 OK\r\n\
+                               Content-Type: text/html\r\n\
+                               Connection: close\r\n\
+                               \r\n\
+                               <h1>Hello from Pico 2W!</h1>\r\n";
+                
+                match socket.write_all(response).await {
+                    Ok(_) => info!("✅ [HTTP] Response sent"),
+                    Err(e) => warn!("❌ [HTTP] Write error: {:?}", e),
+                }
+                
+                socket.close();
+                info!("[HTTP] Connection closed");
+            }
+            Err(e) => {
+                warn!("❌ [HTTP] Accept failed: {:?}", e);
+                Timer::after(Duration::from_secs(1)).await;
+            }
         }
-        Timer::after(Duration::from_millis(100)).await;
-    }
-    
-    loop {
-        if stack.is_config_up() {
-            info!("Network config is UP!");
-            break;
-        }
-        Timer::after(Duration::from_millis(100)).await;
-    }
-    
-    info!("HTTP Server Ready on 192.168.4.1:80");
-    
-    loop {
-        // Create fresh buffers for each connection
-        let mut rx_buffer = [0; 512];
-        let mut tx_buffer = [0; 512];
-        
-        // Pass stack by value
-        let mut socket = TcpSocket::new(stack.clone(), &mut rx_buffer, &mut tx_buffer);
-        
-        if let Err(e) = socket.accept(80).await {
-            warn!("Accept error: {:?}", e);
-            Timer::after(Duration::from_millis(100)).await;
-            continue;
-        }
-        
-        info!("Client connected!");
-        
-        // Simple HTTP response
-        let response = "HTTP/1.1 200 OK\r\n\
-                       Content-Type: text/html\r\n\
-                       Connection: close\r\n\
-                       \r\n\
-                       <html><body><h1>Hello from Pico!</h1></body></html>\r\n";
-        
-        if socket.write_all(response.as_bytes()).await.is_ok() {
-            info!("Response sent");
-        }
-        
-        socket.close();
-        Timer::after(Duration::from_millis(100)).await;
     }
 }
 
@@ -119,20 +111,16 @@ async fn main(spawner: Spawner) {
     
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
     
-    // Unwrap the Result from the task macro
     spawner.spawn(cyw43_task(runner).expect("Failed to spawn cyw43 task"));
     
     control.init(clm).await;
     
-    // Start AP with WPA2 (more reliable than open)
     Timer::after(Duration::from_secs(1)).await;
-    info!("Starting AP: {}", WIFI_SSID);
+    info!("[WiFi] Starting AP...");
     control.start_ap_wpa2(WIFI_SSID, WIFI_PASSWORD, 11).await;
-    info!("AP Started!");
+    info!("✅ [WiFi] AP Started!");
     
-    Timer::after(Duration::from_secs(2)).await;
-    
-    // Network config with static IP
+    // Configure network
     let config = Config::ipv4_static(embassy_net::StaticConfigV4 {
         address: embassy_net::Ipv4Cidr::new(embassy_net::Ipv4Address::new(192, 168, 4, 1), 24),
         dns_servers: heapless::Vec::new(),
@@ -149,20 +137,27 @@ async fn main(spawner: Spawner) {
         embassy_rp::clocks::RoscRng.next_u64()
     );
     
-    // Spawn tasks and unwrap the Results
+    static STACK: StaticCell<embassy_net::Stack<'static>> = StaticCell::new();
+    let stack_ref = STACK.init(stack);
+    
     spawner.spawn(net_task(runner).expect("Failed to spawn net task"));
-    spawner.spawn(http_server_task(stack).expect("Failed to spawn HTTP server task"));
+    spawner.spawn(http_server_task(stack_ref).expect("Failed to spawn HTTP server task"));
     
     info!("=== System Ready ===");
-    info!("Connect to WiFi: {}", WIFI_SSID);
-    info!("Password: {}", WIFI_PASSWORD);
-    info!("Visit: http://192.168.4.1");
+    info!("WiFi: {} / {}", WIFI_SSID, WIFI_PASSWORD);
+    info("Client must use static IP: 192.168.4.2/24");
+    info("Gateway: 192.168.4.1");
+    info!("Test URL: http://192.168.4.1");
     
-    // Simple LED blink
+    // Blink LED to show status
+    let mut status = 0;
     loop {
-        control.gpio_set(0, true).await;
-        Timer::after(Duration::from_millis(500)).await;
-        control.gpio_set(0, false).await;
-        Timer::after(Duration::from_millis(500)).await;
+        control.gpio_set(0, status % 2 == 0).await;
+        Timer::after(Duration::from_secs(1)).await;
+        status += 1;
+        
+        if status % 5 == 0 {
+            info!("[Status] Still running...");
+        }
     }
 }
