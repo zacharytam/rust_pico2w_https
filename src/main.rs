@@ -94,8 +94,8 @@ async fn http_server_task(stack: &'static Stack<'static>) {
     Timer::after(Duration::from_millis(500)).await;
     info!("Starting HTTP server on 192.168.4.1:80");
 
-    let mut rx_buffer = [0; 16384];
-    let mut tx_buffer = [0; 16384];
+    let mut rx_buffer = [0; 8192];
+    let mut tx_buffer = [0; 8192];
     let mut request_count = 0u32;
 
     loop {
@@ -180,129 +180,175 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let rx_count = UART_RX_COUNT.lock().await;
             let http_resp = HTTP_RESPONSE.lock().await;
 
-            // Build response with JavaScript for auto-update
-            let mut response_str = heapless::String::<4096>::new();
-            use core::fmt::Write as _;
-            let _ = core::write!(
-                &mut response_str,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nContent-Length: ",
+            // SIMPLIFIED HTML - no JavaScript first
+            let html = format_html_response(
+                *status,
+                *tx_count,
+                *rx_count,
+                http_resp.as_str(),
+                data.as_str()
             );
-
-            let body = {
-                let mut body_str = heapless::String::<3500>::new();
-                let _ = core::write!(
-                    &mut body_str,
-                    "<html><head><title>Pico 2W LTE Gateway</title>\
-                    <meta name='viewport' content='width=device-width, initial-scale=1'>\
-                    <script>\
-                    function updateStatus() {{\
-                        fetch('/status').then(r => r.json()).then(data => {{\
-                            document.getElementById('status-text').innerHTML = data.status;\
-                            document.getElementById('status-text').style.color = data.status_color;\
-                            document.getElementById('tx-count').innerHTML = data.tx_count;\
-                            document.getElementById('rx-count').innerHTML = data.rx_count;\
-                            document.getElementById('http-response').innerHTML = data.http_response;\
-                            document.getElementById('uart-log').innerHTML = data.uart_log;\
-                        }}).catch(e => console.log('Error:', e));\
-                    }}\
-                    function sendCommand(cmd) {{\
-                        fetch('/at_cmd=' + encodeURIComponent(cmd)).then(() => {{\
-                            setTimeout(updateStatus, 1000);\
-                        }});\
-                        return false;\
-                    }}\
-                    function sendHttpTest() {{\
-                        fetch('/trigger_http').then(() => {{\
-                            setTimeout(updateStatus, 1000);\
-                        }});\
-                        return false;\
-                    }}\
-                    // Auto-update every 3 seconds\
-                    setInterval(updateStatus, 3000);\
-                    // Initial update\
-                    setTimeout(updateStatus, 500);\
-                    </script>\
-                    <style>\
-                    body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}\
-                    .container {{ max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}\
-                    h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}\
-                    .status {{ padding: 15px; margin: 10px 0; border-radius: 5px; background: #f0f8ff; }}\
-                    .button-group {{ display: flex; gap: 10px; margin: 20px 0; flex-wrap: wrap; }}\
-                    button {{ padding: 12px 24px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; transition: opacity 0.3s; }}\
-                    button:hover {{ opacity: 0.8; }}\
-                    button:active {{ transform: scale(0.98); }}\
-                    .btn-http {{ background: #4CAF50; color: white; }}\
-                    .btn-at {{ background: #2196F3; color: white; }}\
-                    .btn-at2 {{ background: #FF9800; color: white; }}\
-                    .btn-at3 {{ background: #9C27B0; color: white; }}\
-                    pre {{ background: #f8f9fa; padding: 15px; border-radius: 5px; overflow: auto; max-height: 300px; font-size: 12px; border: 1px solid #ddd; white-space: pre-wrap; word-wrap: break-word; }}\
-                    .section {{ margin: 20px 0; padding: 15px; background: #fafafa; border-radius: 5px; }}\
-                    .form-group {{ margin: 10px 0; }}\
-                    input[type='text'] {{ width: 70%; padding: 8px; margin-right: 10px; border: 1px solid #ccc; border-radius: 4px; }}\
-                    </style>\
-                    </head><body>\
-                    <div class='container'>\
-                    <h1>Pico 2W LTE Gateway</h1>\
-                    <div class='status'>\
-                    <p><b>EC800K Status:</b> <span id='status-text' style='color:{}'>{}</span></p>\
-                    <p><b>UART Stats:</b> TX: <span id='tx-count'>{}</span> bytes | RX: <span id='rx-count'>{}</span> bytes</p>\
-                    <p><b>WiFi AP:</b> {} (password: {})</p>\
-                    <p><b>Your IP:</b> 192.168.4.2 (set manually)</p>\
-                    </div>\
-                    <div class='section'>\
-                    <h2>Quick Actions</h2>\
-                    <div class='button-group'>\
-                    <button class='btn-http' onclick='sendHttpTest()'>📡 Fetch httpbin.org/get</button>\
-                    <button class='btn-at' onclick='sendCommand(\"AT\\\\r\\\\n\")'>📶 Test AT Command</button>\
-                    <button class='btn-at2' onclick='sendCommand(\"AT+CSQ\\\\r\\\\n\")'>📶 AT+CSQ (Signal)</button>\
-                    <button class='btn-at3' onclick='sendCommand(\"AT+CREG?\\\\r\\\\n\")'>📶 AT+CREG? (Network)</button>\
-                    </div>\
-                    <div class='form-group'>\
-                    <input type='text' id='custom-cmd' placeholder='Enter custom AT command (e.g., AT+CGMI)' style='width: 300px;'>\
-                    <button class='btn-at' onclick='sendCommand(document.getElementById(\"custom-cmd\").value)'>Send AT Command</button>\
-                    </div>\
-                    <p><small><i>Note: Buttons use JavaScript - no page reload needed</i></small></p>\
-                    </div>\
-                    <div class='section'>\
-                    <h2>HTTP Response (httpbin.org/get)</h2>\
-                    <pre id='http-response'>{}</pre>\
-                    </div>\
-                    <div class='section'>\
-                    <h2>EC800K Communication Log</h2>\
-                    <pre id='uart-log'>{}</pre>\
-                    </div>\
-                    <div class='section'>\
-                    <h3>Connection Info</h3>\
-                    <ul>\
-                    <li><b>EC800K TX</b> → GP13 (UART0 RX)</li>\
-                    <li><b>EC800K RX</b> → GP12 (UART0 TX)</li>\
-                    <li><b>EC800K GND</b> → GND</li>\
-                    <li><b>EC800K VCC</b> → 3.3V (check module)</li>\
-                    <li><b>Refresh:</b> Auto-updates every 3 seconds</li>\
-                    </ul>\
-                    </div>\
-                    </div>\
-                    </body></html>",
-                    if status.contains("ERROR") { "red" } else if status.contains("Ready") || status.contains("OK") { "green" } else { "orange" },
-                    *status,
-                    *tx_count,
-                    *rx_count,
-                    WIFI_SSID,
-                    WIFI_PASSWORD,
-                    if http_resp.is_empty() { "[No HTTP response yet]" } else { http_resp.as_str() },
-                    if data.is_empty() { "[Waiting for EC800K communication...]" } else { data.as_str() }
-                );
-                body_str
-            };
-
-            let _ = core::write!(&mut response_str, "{}\r\n\r\n{}", body.len(), body.as_str());
-
+            
             // Write response
-            socket.write_all(response_str.as_bytes()).await?;
+            match socket.write_all(html.as_bytes()).await {
+                Ok(_) => info!("Response sent ({} bytes)", html.len()),
+                Err(e) => warn!("Write error: {:?}", e),
+            }
+            
             socket.flush().await?;
         }
     }
 
+    Ok(())
+}
+
+// Simplified HTML response without JavaScript
+fn format_html_response(
+    status: &str,
+    tx_count: u32,
+    rx_count: u32,
+    http_response: &str,
+    uart_log: &str
+) -> heapless::String<4096> {
+    let mut html = heapless::String::new();
+    
+    let status_color = if status.contains("ERROR") { "red" } 
+        else if status.contains("Ready") || status.contains("OK") { "green" } 
+        else { "orange" };
+    
+    let http_display = if http_response.is_empty() { "[No HTTP response yet]" } else { http_response };
+    let uart_display = if uart_log.is_empty() { "[Waiting for EC800K communication...]" } else { uart_log };
+    
+    // Build HTML
+    let _ = html.push_str("HTTP/1.1 200 OK\r\n");
+    let _ = html.push_str("Content-Type: text/html; charset=utf-8\r\n");
+    let _ = html.push_str("Connection: close\r\n\r\n");
+    
+    let _ = html.push_str("<!DOCTYPE html><html><head>");
+    let _ = html.push_str("<title>Pico 2W LTE Gateway</title>");
+    let _ = html.push_str("<meta name='viewport' content='width=device-width, initial-scale=1'>");
+    let _ = html.push_str("<meta http-equiv='refresh' content='5'>");  // Auto-refresh every 5 seconds
+    let _ = html.push_str("<style>");
+    let _ = html.push_str("body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }");
+    let _ = html.push_str(".container { max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }");
+    let _ = html.push_str("h1 { color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }");
+    let _ = html.push_str(".status { padding: 15px; margin: 10px 0; border-radius: 5px; background: #f0f8ff; }");
+    let _ = html.push_str(".button-group { display: flex; gap: 10px; margin: 20px 0; flex-wrap: wrap; }");
+    let _ = html.push_str("button { padding: 12px 24px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; }");
+    let _ = html.push_str(".btn-http { background: #4CAF50; color: white; }");
+    let _ = html.push_str(".btn-at { background: #2196F3; color: white; }");
+    let _ = html.push_str(".btn-at2 { background: #FF9800; color: white; }");
+    let _ = html.push_str(".btn-at3 { background: #9C27B0; color: white; }");
+    let _ = html.push_str("pre { background: #f8f9fa; padding: 15px; border-radius: 5px; overflow: auto; max-height: 300px; font-size: 12px; border: 1px solid #ddd; white-space: pre-wrap; word-wrap: break-word; }");
+    let _ = html.push_str(".section { margin: 20px 0; padding: 15px; background: #fafafa; border-radius: 5px; }");
+    let _ = html.push_str(".form-group { margin: 10px 0; }");
+    let _ = html.push_str("input[type='text'] { width: 300px; padding: 8px; margin-right: 10px; border: 1px solid #ccc; border-radius: 4px; }");
+    let _ = html.push_str("</style></head><body>");
+    
+    let _ = html.push_str("<div class='container'>");
+    let _ = html.push_str("<h1>Pico 2W LTE Gateway</h1>");
+    
+    // Status section
+    let _ = html.push_str("<div class='status'>");
+    let _ = html.push_str("<p><b>EC800K Status:</b> <span style='color:");
+    let _ = html.push_str(status_color);
+    let _ = html.push_str("'>");
+    let _ = html.push_str(status);
+    let _ = html.push_str("</span></p>");
+    let _ = html.push_str("<p><b>UART Stats:</b> TX: ");
+    let _ = write_u32(&mut html, tx_count);
+    let _ = html.push_str(" bytes | RX: ");
+    let _ = write_u32(&mut html, rx_count);
+    let _ = html.push_str(" bytes</p>");
+    let _ = html.push_str("<p><b>WiFi AP:</b> ");
+    let _ = html.push_str(WIFI_SSID);
+    let _ = html.push_str(" (password: ");
+    let _ = html.push_str(WIFI_PASSWORD);
+    let _ = html.push_str(")</p>");
+    let _ = html.push_str("<p><b>Your IP:</b> 192.168.4.2 (set manually)</p>");
+    let _ = html.push_str("<p><i>Page auto-refreshes every 5 seconds</i></p>");
+    let _ = html.push_str("</div>");
+    
+    // Button section
+    let _ = html.push_str("<div class='section'>");
+    let _ = html.push_str("<h2>Quick Actions</h2>");
+    let _ = html.push_str("<div class='button-group'>");
+    let _ = html.push_str("<form action='/trigger_http' method='get'>");
+    let _ = html.push_str("<button class='btn-http' type='submit'>📡 Fetch httpbin.org/get</button>");
+    let _ = html.push_str("</form>");
+    let _ = html.push_str("<form action='/trigger_at' method='get'>");
+    let _ = html.push_str("<button class='btn-at' type='submit'>📶 Test AT Command</button>");
+    let _ = html.push_str("</form>");
+    let _ = html.push_str("<form action='/at_cmd=AT+CSQ' method='get'>");
+    let _ = html.push_str("<button class='btn-at2' type='submit'>📶 AT+CSQ (Signal)</button>");
+    let _ = html.push_str("</form>");
+    let _ = html.push_str("<form action='/at_cmd=AT+CREG?' method='get'>");
+    let _ = html.push_str("<button class='btn-at3' type='submit'>📶 AT+CREG? (Network)</button>");
+    let _ = html.push_str("</form>");
+    let _ = html.push_str("</div>");
+    
+    // Custom command form
+    let _ = html.push_str("<div class='form-group'>");
+    let _ = html.push_str("<form action='/' method='get'>");
+    let _ = html.push_str("<input type='text' name='at_cmd' placeholder='Enter custom AT command (e.g., AT+CGMI)'>");
+    let _ = html.push_str("<button class='btn-at' type='submit'>Send AT Command</button>");
+    let _ = html.push_str("</form>");
+    let _ = html.push_str("</div>");
+    let _ = html.push_str("</div>");
+    
+    // HTTP Response section
+    let _ = html.push_str("<div class='section'>");
+    let _ = html.push_str("<h2>HTTP Response (httpbin.org/get)</h2>");
+    let _ = html.push_str("<pre>");
+    let _ = html.push_str(http_display);
+    let _ = html.push_str("</pre>");
+    let _ = html.push_str("</div>");
+    
+    // UART Log section
+    let _ = html.push_str("<div class='section'>");
+    let _ = html.push_str("<h2>EC800K Communication Log</h2>");
+    let _ = html.push_str("<pre>");
+    let _ = html.push_str(uart_display);
+    let _ = html.push_str("</pre>");
+    let _ = html.push_str("</div>");
+    
+    // Connection info
+    let _ = html.push_str("<div class='section'>");
+    let _ = html.push_str("<h3>Connection Info</h3>");
+    let _ = html.push_str("<ul>");
+    let _ = html.push_str("<li><b>EC800K TX</b> → GP13 (UART0 RX)</li>");
+    let _ = html.push_str("<li><b>EC800K RX</b> → GP12 (UART0 TX)</li>");
+    let _ = html.push_str("<li><b>EC800K GND</b> → GND</li>");
+    let _ = html.push_str("<li><b>EC800K VCC</b> → 3.3V (check module)</li>");
+    let _ = html.push_str("<li><b>Refresh:</b> Auto-updates every 5 seconds</li>");
+    let _ = html.push_str("</ul>");
+    let _ = html.push_str("</div>");
+    
+    let _ = html.push_str("</div></body></html>");
+    
+    html
+}
+
+// Helper to write u32 to string
+fn write_u32(s: &mut heapless::String<4096>, n: u32) -> Result<(), ()> {
+    let mut buffer = heapless::Vec::<u8, 10>::new();
+    let mut n = n;
+    
+    if n == 0 {
+        let _ = s.push_str("0");
+        return Ok(());
+    }
+    
+    while n > 0 {
+        let digit = (n % 10) as u8 + b'0';
+        let _ = buffer.push(digit);
+        n /= 10;
+    }
+    
+    for &digit in buffer.iter().rev() {
+        let _ = s.push(digit as char);
+    }
+    
     Ok(())
 }
 
@@ -349,6 +395,7 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
         let _ = data.push_str("=== EC800K LTE Modem ===\n");
         let _ = data.push_str("Pins: GP12(TX)→EC800K_RX, GP13(RX)←EC800K_TX\n");
         let _ = data.push_str("Baud: 115200 (default)\n");
+        let _ = data.push_str("Waiting for modem...\n");
     }
     
     // Wait for modem to stabilize
@@ -365,14 +412,10 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                     let _ = data.push_str("Boot: ");
                     let _ = data.push_str(s);
                     
-                    // Truncate if too long
-                    if data.len() > 1500 {
-                        let start = data.len() - 1200;
-                        let mut tail = heapless::String::<1200>::new();
-                        let _ = tail.push_str(&data[start..]);
-                        data.clear();
-                        let _ = data.push_str("...[truncated]...\n");
-                        let _ = data.push_str(tail.as_str());
+                    // Update status if we see RDY or other boot messages
+                    if s.contains("RDY") || s.contains("READY") {
+                        let mut status = EC800K_STATUS.lock().await;
+                        *status = "Boot complete";
                     }
                 }
             }
@@ -381,7 +424,12 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
         Timer::after(Duration::from_millis(100)).await;
     }
     
-    // Main loop to handle triggers - FIXED: Added yield to prevent blocking
+    {
+        let mut status = EC800K_STATUS.lock().await;
+        *status = "Ready - click buttons to test";
+    }
+    
+    // Main loop to handle triggers
     loop {
         // Wait for either HTTP trigger or AT trigger with timeout
         info!("Waiting for trigger...");
@@ -532,6 +580,9 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
             *status = "AT Response received";
         } else {
             *status = "No response from EC800K";
+            // Add error to data log
+            let mut data = EC800K_DATA.lock().await;
+            let _ = data.push_str("<< NO RESPONSE - Check wiring/baud rate\n");
         }
     }
     
