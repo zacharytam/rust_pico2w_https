@@ -67,18 +67,16 @@ static HTTP_RESPONSE: embassy_sync::mutex::Mutex<
     heapless::String<2048>,
 > = embassy_sync::mutex::Mutex::new(heapless::String::new());
 
-// Queues for button actions (use a queue instead of signal for better task yielding)
-static AT_COMMAND_QUEUE: embassy_sync::mpmc::MpmcQueue<
-    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    heapless::String<64>,
-    4,  // Queue size
-> = embassy_sync::mpmc::MpmcQueue::new();
-
-static HTTP_REQUEST_QUEUE: embassy_sync::mpmc::MpmcQueue<
+// Use signals instead of queues (available in your Embassy version)
+static HTTP_REQUEST_SIGNAL: embassy_sync::signal::Signal<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     bool,
-    2,  // Queue size
-> = embassy_sync::mpmc::MpmcQueue::new();
+> = embassy_sync::signal::Signal::new();
+
+static AT_COMMAND_SIGNAL: embassy_sync::signal::Signal<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    heapless::String<64>,
+> = embassy_sync::signal::Signal::new();
 
 static UART_TX_COUNT: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -102,7 +100,7 @@ async fn http_server_task(stack: &'static Stack<'static>) {
 
     loop {
         let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
-        socket.set_timeout(Some(Duration::from_secs(10)));  // Reduced from 30s to 10s
+        socket.set_timeout(Some(Duration::from_secs(10)));
 
         info!("Listening on TCP:80... (requests served: {})", request_count);
         if let Err(e) = socket.accept(80).await {
@@ -120,13 +118,12 @@ async fn http_server_task(stack: &'static Stack<'static>) {
         }
 
         socket.abort();
-        // IMPORTANT: Yield to other tasks
         Timer::after(Duration::from_millis(10)).await;
     }
 }
 
 async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tcp::Error> {
-    let mut buf = [0; 1024];  // Smaller buffer
+    let mut buf = [0; 1024];
 
     // Quick read with short timeout
     let n = match embassy_time::with_timeout(Duration::from_secs(2), socket.read(&mut buf)).await {
@@ -153,25 +150,25 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
         if parts.len() >= 2 {
             let path = parts[1];
             
-            // Handle button triggers - NON-BLOCKING queue push
+            // Handle button triggers
             if path.contains("/trigger_http") {
-                info!("HTTP request queued!");
-                let _ = HTTP_REQUEST_QUEUE.try_send(true);  // Non-blocking
+                info!("HTTP request triggered!");
+                HTTP_REQUEST_SIGNAL.signal(true);
             } else if path.contains("/trigger_at") {
-                info!("AT test queued!");
+                info!("AT test triggered!");
                 let mut default_cmd = heapless::String::new();
                 let _ = default_cmd.push_str("AT\r\n");
-                let _ = AT_COMMAND_QUEUE.try_send(default_cmd);
+                AT_COMMAND_SIGNAL.signal(default_cmd);
             } else if path.contains("/at_cmd=") {
                 if let Some(cmd_start) = path.find("at_cmd=") {
                     let cmd = &path[cmd_start + 7..];
                     let decoded_cmd = url_decode(cmd);
-                    info!("Custom AT command queued: {}", decoded_cmd);
-                    let _ = AT_COMMAND_QUEUE.try_send(decoded_cmd);
+                    info!("Custom AT command: {}", decoded_cmd);
+                    AT_COMMAND_SIGNAL.signal(decoded_cmd);
                 }
             }
 
-            // Get EC800K status - QUICK lock acquisition
+            // Get EC800K status
             let (status, tx_count, rx_count, http_resp, data) = {
                 let status = EC800K_STATUS.lock().await;
                 let data = EC800K_DATA.lock().await;
@@ -357,24 +354,42 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
     // Wait for modem
     Timer::after(Duration::from_secs(2)).await;
     
+    // Flag to prevent multiple simultaneous operations
+    let mut operation_in_progress = false;
+    
     // MAIN LOOP - YIELD FREQUENTLY
     loop {
-        // Check for queued commands - NON-BLOCKING
-        if let Ok(cmd) = AT_COMMAND_QUEUE.try_receive() {
-            info!("Processing AT command: {}", cmd);
-            quick_at_test(&mut tx, &mut rx, cmd.as_str()).await;
+        // Check for signals - but only if not already processing
+        if !operation_in_progress {
+            // Use select to wait for either signal with timeout
+            use embassy_futures::select;
+            
+            match select::select(
+                AT_COMMAND_SIGNAL.wait(),
+                HTTP_REQUEST_SIGNAL.wait()
+            ).await {
+                select::Either::First(cmd) => {
+                    operation_in_progress = true;
+                    info!("Processing AT command: {}", cmd);
+                    quick_at_test(&mut tx, &mut rx, cmd.as_str()).await;
+                    operation_in_progress = false;
+                }
+                select::Either::Second(_) => {
+                    operation_in_progress = true;
+                    info!("Processing HTTP test");
+                    quick_http_test(&mut tx, &mut rx).await;
+                    operation_in_progress = false;
+                }
+            }
+        } else {
+            // If operation in progress, just yield and check for incoming data
+            Timer::after(Duration::from_millis(50)).await;
         }
         
-        // Check for HTTP test requests
-        if let Ok(_) = HTTP_REQUEST_QUEUE.try_receive() {
-            info!("Processing HTTP test");
-            quick_http_test(&mut tx, &mut rx).await;
-        }
-        
-        // Check for incoming data - VERY QUICK
+        // Check for incoming data - VERY QUICK (non-blocking)
         let mut buf = [0u8; 64];
-        match embassy_time::with_timeout(Duration::from_millis(10), rx.read(&mut buf)).await {
-            Ok(Ok(n)) if n > 0 => {
+        match rx.try_read(&mut buf) {
+            Ok(n) if n > 0 => {
                 let mut rx_count = UART_RX_COUNT.lock().await;
                 *rx_count += n as u32;
                 
@@ -434,8 +449,8 @@ async fn quick_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command
     
     // Try reading for max 100ms total
     for _ in 0..5 {
-        match embassy_time::with_timeout(Duration::from_millis(20), rx.read(&mut buf)).await {
-            Ok(Ok(n)) if n > 0 => {
+        match rx.try_read(&mut buf) {
+            Ok(n) if n > 0 => {
                 got_response = true;
                 let mut rx_count = UART_RX_COUNT.lock().await;
                 *rx_count += n as u32;
@@ -500,12 +515,12 @@ async fn quick_http_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
     
     // Try to read response - quick
     let mut buf = [0u8; 128];
-    let mut response = heapless::String::new();
+    let mut response = heapless::String::<256>::new(); // Fixed: specify capacity
     
-    match embassy_time::with_timeout(Duration::from_millis(100), rx.read(&mut buf)).await {
-        Ok(Ok(n)) if n > 0 => {
+    match rx.try_read(&mut buf) {
+        Ok(n) if n > 0 => {
             if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                response.push_str(s).ok();
+                let _ = response.push_str(s);
                 
                 {
                     let mut data = EC800K_DATA.lock().await;
