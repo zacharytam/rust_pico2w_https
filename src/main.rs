@@ -59,7 +59,7 @@ static EC800K_STATUS: embassy_sync::mutex::Mutex<
 
 static EC800K_DATA: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    heapless::String<1024>,
+    heapless::String<2048>,
 > = embassy_sync::mutex::Mutex::new(heapless::String::new());
 
 static HTTP_RESPONSE: embassy_sync::mutex::Mutex<
@@ -162,14 +162,14 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
                 info!("AT test triggered!");
                 let mut default_cmd = heapless::String::new();
                 let _ = default_cmd.push_str("AT\r\n");
-                AT_TEST_TRIGGER.signal(default_cmd);  // Pass owned String
+                AT_TEST_TRIGGER.signal(default_cmd);
             } else if path.contains("/at_cmd=") {
                 // Extract custom AT command from URL
                 if let Some(cmd_start) = path.find("at_cmd=") {
                     let cmd = &path[cmd_start + 7..];
                     let decoded_cmd = url_decode(cmd);
                     info!("Custom AT command: {}", decoded_cmd);
-                    AT_TEST_TRIGGER.signal(decoded_cmd);  // Pass owned String
+                    AT_TEST_TRIGGER.signal(decoded_cmd);
                 }
             }
 
@@ -180,7 +180,7 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let rx_count = UART_RX_COUNT.lock().await;
             let http_resp = HTTP_RESPONSE.lock().await;
 
-            // Build response with two buttons
+            // Build response with JavaScript for auto-update
             let mut response_str = heapless::String::<4096>::new();
             use core::fmt::Write as _;
             let _ = core::write!(
@@ -194,19 +194,48 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
                     &mut body_str,
                     "<html><head><title>Pico 2W LTE Gateway</title>\
                     <meta name='viewport' content='width=device-width, initial-scale=1'>\
-                    <meta http-equiv='refresh' content='5'>\
+                    <script>\
+                    function updateStatus() {{\
+                        fetch('/status').then(r => r.json()).then(data => {{\
+                            document.getElementById('status-text').innerHTML = data.status;\
+                            document.getElementById('status-text').style.color = data.status_color;\
+                            document.getElementById('tx-count').innerHTML = data.tx_count;\
+                            document.getElementById('rx-count').innerHTML = data.rx_count;\
+                            document.getElementById('http-response').innerHTML = data.http_response;\
+                            document.getElementById('uart-log').innerHTML = data.uart_log;\
+                        }}).catch(e => console.log('Error:', e));\
+                    }}\
+                    function sendCommand(cmd) {{\
+                        fetch('/at_cmd=' + encodeURIComponent(cmd)).then(() => {{\
+                            setTimeout(updateStatus, 1000);\
+                        }});\
+                        return false;\
+                    }}\
+                    function sendHttpTest() {{\
+                        fetch('/trigger_http').then(() => {{\
+                            setTimeout(updateStatus, 1000);\
+                        }});\
+                        return false;\
+                    }}\
+                    // Auto-update every 3 seconds\
+                    setInterval(updateStatus, 3000);\
+                    // Initial update\
+                    setTimeout(updateStatus, 500);\
+                    </script>\
                     <style>\
                     body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}\
                     .container {{ max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}\
                     h1 {{ color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }}\
                     .status {{ padding: 15px; margin: 10px 0; border-radius: 5px; background: #f0f8ff; }}\
                     .button-group {{ display: flex; gap: 10px; margin: 20px 0; flex-wrap: wrap; }}\
-                    button {{ padding: 12px 24px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; }}\
+                    button {{ padding: 12px 24px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; transition: opacity 0.3s; }}\
+                    button:hover {{ opacity: 0.8; }}\
+                    button:active {{ transform: scale(0.98); }}\
                     .btn-http {{ background: #4CAF50; color: white; }}\
                     .btn-at {{ background: #2196F3; color: white; }}\
                     .btn-at2 {{ background: #FF9800; color: white; }}\
                     .btn-at3 {{ background: #9C27B0; color: white; }}\
-                    pre {{ background: #f8f9fa; padding: 15px; border-radius: 5px; overflow: auto; max-height: 300px; font-size: 12px; border: 1px solid #ddd; }}\
+                    pre {{ background: #f8f9fa; padding: 15px; border-radius: 5px; overflow: auto; max-height: 300px; font-size: 12px; border: 1px solid #ddd; white-space: pre-wrap; word-wrap: break-word; }}\
                     .section {{ margin: 20px 0; padding: 15px; background: #fafafa; border-radius: 5px; }}\
                     .form-group {{ margin: 10px 0; }}\
                     input[type='text'] {{ width: 70%; padding: 8px; margin-right: 10px; border: 1px solid #ccc; border-radius: 4px; }}\
@@ -215,76 +244,53 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
                     <div class='container'>\
                     <h1>Pico 2W LTE Gateway</h1>\
                     <div class='status'>\
-                    <p><b>EC800K Status:</b> <span style='color:{}'>{}</span></p>\
-                    <p><b>UART Stats:</b> TX: {} bytes | RX: {} bytes</p>\
+                    <p><b>EC800K Status:</b> <span id='status-text' style='color:{}'>{}</span></p>\
+                    <p><b>UART Stats:</b> TX: <span id='tx-count'>{}</span> bytes | RX: <span id='rx-count'>{}</span> bytes</p>\
                     <p><b>WiFi AP:</b> {} (password: {})</p>\
                     <p><b>Your IP:</b> 192.168.4.2 (set manually)</p>\
                     </div>\
                     <div class='section'>\
                     <h2>Quick Actions</h2>\
                     <div class='button-group'>\
-                    <form action='/trigger_http' method='get'>\
-                    <button class='btn-http' type='submit'>📡 Fetch httpbin.org/get</button>\
-                    </form>\
-                    <form action='/trigger_at' method='get'>\
-                    <button class='btn-at' type='submit'>📶 Test AT Command</button>\
-                    </form>\
-                    <form action='/at_cmd=AT+CSQ' method='get'>\
-                    <button class='btn-at2' type='submit'>📶 AT+CSQ (Signal)</button>\
-                    </form>\
-                    <form action='/at_cmd=AT+CREG?' method='get'>\
-                    <button class='btn-at3' type='submit'>📶 AT+CREG? (Network)</button>\
-                    </form>\
+                    <button class='btn-http' onclick='sendHttpTest()'>📡 Fetch httpbin.org/get</button>\
+                    <button class='btn-at' onclick='sendCommand(\"AT\\\\r\\\\n\")'>📶 Test AT Command</button>\
+                    <button class='btn-at2' onclick='sendCommand(\"AT+CSQ\\\\r\\\\n\")'>📶 AT+CSQ (Signal)</button>\
+                    <button class='btn-at3' onclick='sendCommand(\"AT+CREG?\\\\r\\\\n\")'>📶 AT+CREG? (Network)</button>\
                     </div>\
                     <div class='form-group'>\
-                    <form action='/' method='get'>\
-                    <input type='text' name='at_cmd' placeholder='Enter custom AT command (e.g., AT+CGMI)'>\
-                    <button class='btn-at' type='submit'>Send AT Command</button>\
-                    </form>\
+                    <input type='text' id='custom-cmd' placeholder='Enter custom AT command (e.g., AT+CGMI)' style='width: 300px;'>\
+                    <button class='btn-at' onclick='sendCommand(document.getElementById(\"custom-cmd\").value)'>Send AT Command</button>\
                     </div>\
+                    <p><small><i>Note: Buttons use JavaScript - no page reload needed</i></small></p>\
                     </div>\
                     <div class='section'>\
                     <h2>HTTP Response (httpbin.org/get)</h2>\
-                    <pre>{}</pre>\
+                    <pre id='http-response'>{}</pre>\
                     </div>\
                     <div class='section'>\
                     <h2>EC800K Communication Log</h2>\
-                    <pre>{}</pre>\
+                    <pre id='uart-log'>{}</pre>\
                     </div>\
                     <div class='section'>\
-                    <h3>Pin Configuration (Pico 2W)</h3>\
+                    <h3>Connection Info</h3>\
                     <ul>\
                     <li><b>EC800K TX</b> → GP13 (UART0 RX)</li>\
                     <li><b>EC800K RX</b> → GP12 (UART0 TX)</li>\
                     <li><b>EC800K GND</b> → GND</li>\
-                    <li><b>EC800K VCC</b> → 5V or 3.3V (check module)</li>\
+                    <li><b>EC800K VCC</b> → 3.3V (check module)</li>\
+                    <li><b>Refresh:</b> Auto-updates every 3 seconds</li>\
                     </ul>\
-                    <p><small>Note: You must manually set your IP to 192.168.4.2/24</small></p>\
                     </div>\
                     </div>\
                     </body></html>",
-                    if status.contains("ERROR") {
-                        "red"
-                    } else if status.contains("Ready") || status.contains("complete") {
-                        "green"
-                    } else {
-                        "orange"
-                    },
+                    if status.contains("ERROR") { "red" } else if status.contains("Ready") || status.contains("OK") { "green" } else { "orange" },
                     *status,
                     *tx_count,
                     *rx_count,
                     WIFI_SSID,
                     WIFI_PASSWORD,
-                    if http_resp.is_empty() {
-                        "[No HTTP response yet - click 'Fetch httpbin.org/get' to test]"
-                    } else {
-                        http_resp.as_str()
-                    },
-                    if data.is_empty() {
-                        "[Waiting for EC800K communication...]"
-                    } else {
-                        data.as_str()
-                    }
+                    if http_resp.is_empty() { "[No HTTP response yet]" } else { http_resp.as_str() },
+                    if data.is_empty() { "[Waiting for EC800K communication...]" } else { data.as_str() }
                 );
                 body_str
             };
@@ -292,14 +298,11 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let _ = core::write!(&mut response_str, "{}\r\n\r\n{}", body.len(), body.as_str());
 
             // Write response
-            info!("Sending response ({} bytes)", response_str.len());
             socket.write_all(response_str.as_bytes()).await?;
             socket.flush().await?;
-            info!("Response sent successfully");
         }
     }
 
-    Timer::after(Duration::from_millis(100)).await;
     Ok(())
 }
 
@@ -361,6 +364,16 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                     let mut data = EC800K_DATA.lock().await;
                     let _ = data.push_str("Boot: ");
                     let _ = data.push_str(s);
+                    
+                    // Truncate if too long
+                    if data.len() > 1500 {
+                        let start = data.len() - 1200;
+                        let mut tail = heapless::String::<1200>::new();
+                        let _ = tail.push_str(&data[start..]);
+                        data.clear();
+                        let _ = data.push_str("...[truncated]...\n");
+                        let _ = data.push_str(tail.as_str());
+                    }
                 }
             }
             _ => break,
@@ -368,27 +381,71 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
         Timer::after(Duration::from_millis(100)).await;
     }
     
-    // Main loop to handle triggers
+    // Main loop to handle triggers - FIXED: Added yield to prevent blocking
     loop {
-        // Wait for either HTTP trigger or AT trigger
+        // Wait for either HTTP trigger or AT trigger with timeout
         info!("Waiting for trigger...");
         
-        // Use embassy_futures::select to wait for either signal
+        // Use select with timeout to prevent blocking
         use embassy_futures::select;
         
         match select::select(
-            HTTP_REQUEST_TRIGGER.wait(),
-            AT_TEST_TRIGGER.wait()
+            embassy_futures::select::select(
+                HTTP_REQUEST_TRIGGER.wait(),
+                AT_TEST_TRIGGER.wait()
+            ),
+            Timer::after(Duration::from_millis(100))
         ).await {
-            select::Either::First(_) => {
-                info!("HTTP test triggered!");
-                run_http_test(&mut tx, &mut rx).await;
+            select::Either::First(trigger_result) => {
+                match trigger_result {
+                    select::Either::First(_) => {
+                        info!("HTTP test triggered!");
+                        run_http_test(&mut tx, &mut rx).await;
+                    }
+                    select::Either::Second(command) => {
+                        info!("AT command triggered: {}", command);
+                        run_at_test(&mut tx, &mut rx, command.as_str()).await;
+                    }
+                }
             }
-            select::Either::Second(command) => {
-                info!("AT command triggered: {}", command);
-                run_at_test(&mut tx, &mut rx, command.as_str()).await;
+            select::Either::Second(_) => {
+                // Timeout - just check for incoming data without blocking
+                check_for_incoming_data(&mut rx).await;
             }
         }
+        
+        // Small yield to allow other tasks to run
+        Timer::after(Duration::from_millis(10)).await;
+    }
+}
+
+async fn check_for_incoming_data(rx: &mut BufferedUartRx) {
+    let mut buf = [0u8; 256];
+    // Non-blocking read
+    match rx.read(&mut buf).await {
+        Ok(n) if n > 0 => {
+            let mut rx_count = UART_RX_COUNT.lock().await;
+            *rx_count += n as u32;
+            
+            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                if !s.trim().is_empty() {
+                    let mut data = EC800K_DATA.lock().await;
+                    let _ = data.push_str("<< ");
+                    let _ = data.push_str(s);
+                    
+                    // Truncate if too long
+                    if data.len() > 1500 {
+                        let start = data.len() - 1200;
+                        let mut tail = heapless::String::<1200>::new();
+                        let _ = tail.push_str(&data[start..]);
+                        data.clear();
+                        let _ = data.push_str("...[truncated]...\n");
+                        let _ = data.push_str(tail.as_str());
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -425,14 +482,14 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
         }
     }
     
-    // Wait for response
-    Timer::after(Duration::from_millis(500)).await;
+    // Wait for response with timeout and yield
+    Timer::after(Duration::from_millis(100)).await;
     
-    // Read response with timeout
+    // Read response with multiple attempts
     let mut response = heapless::String::<512>::new();
     let mut response_received = false;
     
-    for attempt in 0..10 {
+    for attempt in 0..5 {  // Reduced from 10 to 5 attempts
         let mut buf = [0u8; 256];
         match rx.read(&mut buf).await {
             Ok(n) if n > 0 => {
@@ -444,35 +501,27 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
                     info!("AT Response (attempt {}): {}", attempt + 1, s);
                     let _ = response.push_str(s);
                     
-                    // Update data log in real-time
+                    // Update data log
                     {
                         let mut data = EC800K_DATA.lock().await;
                         let _ = data.push_str("<< ");
                         let _ = data.push_str(s);
-                        
-                        // Truncate if too long
-                        if data.len() > 800 {
-                            let start = data.len() - 600;
-                            let mut tail = heapless::String::<600>::new();
-                            let _ = tail.push_str(&data[start..]);
-                            data.clear();
-                            let _ = data.push_str("...[truncated]...\n");
-                            let _ = data.push_str(tail.as_str());
-                        }
                     }
                     
                     // Check if we have a complete response
-                    if s.contains("OK") || s.contains("ERROR") || s.contains("\r\n") {
+                    if s.contains("OK") || s.contains("ERROR") {
                         break;
                     }
                 }
             }
             _ => {}
         }
-        Timer::after(Duration::from_millis(200)).await;
+        
+        // Yield between attempts to allow other tasks
+        Timer::after(Duration::from_millis(50)).await;
     }
     
-    // Update status based on response
+    // Update status
     {
         let mut status = EC800K_STATUS.lock().await;
         if response.contains("OK") {
@@ -480,12 +529,9 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
         } else if response.contains("ERROR") {
             *status = "AT ERROR - Command failed";
         } else if response_received {
-            *status = "AT Response received (no OK/ERROR)";
+            *status = "AT Response received";
         } else {
-            *status = "ERROR: No response from EC800K";
-            // Add error to data log
-            let mut data = EC800K_DATA.lock().await;
-            let _ = data.push_str("<< NO RESPONSE - Check wiring/baud rate\n");
+            *status = "No response from EC800K";
         }
     }
     
@@ -498,7 +544,7 @@ async fn run_http_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
     // Update status
     {
         let mut status = EC800K_STATUS.lock().await;
-        *status = "Starting HTTP test...";
+        *status = "Testing EC800K connection...";
     }
     
     {
@@ -510,19 +556,22 @@ async fn run_http_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
     let mut buf = [0u8; 256];
     let _ = rx.read(&mut buf).await;
     
-    // Step 1: Test AT command first
-    info!("Step 1: Testing AT command");
+    // Test AT command first
+    info!("Testing AT command");
     let test_cmd = b"AT\r\n";
-    tx.write_all(test_cmd).await.ok();
+    if tx.write_all(test_cmd).await.is_err() {
+        warn!("Failed to send AT command");
+        return;
+    }
     
     {
         let mut tx_count = UART_TX_COUNT.lock().await;
         *tx_count += test_cmd.len() as u32;
     }
     
+    // Wait and read response
     Timer::after(Duration::from_millis(500)).await;
     
-    // Read response
     let mut at_response = heapless::String::<256>::new();
     match rx.read(&mut buf).await {
         Ok(n) if n > 0 => {
@@ -530,43 +579,45 @@ async fn run_http_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                 info!("AT Response: {}", s);
                 at_response.push_str(s).ok();
                 
-                let mut data = EC800K_DATA.lock().await;
-                let _ = data.push_str(">> AT\\r\\n\n<< ");
-                let _ = data.push_str(s);
+                {
+                    let mut data = EC800K_DATA.lock().await;
+                    let _ = data.push_str(">> AT\\r\\n\n<< ");
+                    let _ = data.push_str(s);
+                }
             }
         }
-        _ => {
-            info!("No response to AT command");
-        }
+        _ => {}
     }
     
-    // Update HTTP response with test results
+    // Update HTTP response
     {
         let mut http_resp = HTTP_RESPONSE.lock().await;
         http_resp.clear();
         
         if at_response.contains("OK") {
-            let _ = http_resp.push_str("EC800K is responding to AT commands!\n\n");
-            let _ = http_resp.push_str("To actually fetch from httpbin.org, you need to:\n");
-            let _ = http_resp.push_str("1. Set APN for your SIM card (AT+CGDCONT=1,\"IP\",\"your_apn\")\n");
-            let _ = http_resp.push_str("2. Activate PDP context (AT+QIACT=1)\n");
-            let _ = http_resp.push_str("3. Open TCP connection (AT+QIOPEN=1,0,\"TCP\",\"httpbin.org\",80)\n");
-            let _ = http_resp.push_str("4. Send HTTP request (AT+QISEND=0,...)\n");
-            let _ = http_resp.push_str("5. Read response\n");
-            let _ = http_resp.push_str("\nAT response was: ");
+            let _ = http_resp.push_str("✅ EC800K is responding to AT commands!\n\n");
+            let _ = http_resp.push_str("To fetch from httpbin.org, you need to:\n");
+            let _ = http_resp.push_str("1. Set your APN: AT+CGDCONT=1,\"IP\",\"your_apn\"\n");
+            let _ = http_resp.push_str("2. Activate context: AT+QIACT=1\n");
+            let _ = http_resp.push_str("3. Open connection: AT+QIOPEN=1,0,\"TCP\",\"httpbin.org\",80\n");
+            let _ = http_resp.push_str("4. Send HTTP request\n");
+            let _ = http_resp.push_str("\nAT response: ");
             let _ = http_resp.push_str(&at_response);
             
-            let mut status = EC800K_STATUS.lock().await;
-            *status = "Ready for HTTP (APN needed)";
+            {
+                let mut status = EC800K_STATUS.lock().await;
+                *status = "Ready - AT working";
+            }
         } else {
-            let _ = http_resp.push_str("EC800K not responding to AT commands.\n");
-            let _ = http_resp.push_str("Check:\n");
-            let _ = http_resp.push_str("1. Wiring: GP12→EC800K_RX, GP13←EC800K_TX\n");
-            let _ = http_resp.push_str("2. Power to EC800K module\n");
-            let _ = http_resp.push_str("3. Baud rate (115200)\n");
+            let _ = http_resp.push_str("❌ EC800K not responding\n");
+            let _ = http_resp.push_str("Check wiring and power\n");
+            let _ = http_resp.push_str("GP12 → EC800K RX\n");
+            let _ = http_resp.push_str("GP13 ← EC800K TX\n");
             
-            let mut status = EC800K_STATUS.lock().await;
-            *status = "ERROR: No AT response";
+            {
+                let mut status = EC800K_STATUS.lock().await;
+                *status = "ERROR: No AT response";
+            }
         }
     }
     
@@ -687,7 +738,7 @@ async fn main(spawner: Spawner) {
         Timer::after(Duration::from_millis(900)).await;
         
         blink_count += 1;
-        if blink_count % 10 == 0 {
+        if blink_count % 20 == 0 {
             info!("System alive...");
         }
     }
