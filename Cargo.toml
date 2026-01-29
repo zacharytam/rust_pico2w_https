@@ -16,6 +16,8 @@ embassy-futures       = { git = "https://github.com/embassy-rs/embassy.git", rev
 cyw43     = { git = "https://github.com/embassy-rs/embassy.git", rev = "286d887529c66d8d1b4c7b56849e7a95386d79db", features = ["defmt", "firmware-logs"] }
 cyw43-pio = { git = "https://github.com/embassy-rs/embassy.git", rev = "286d887529c66d8d1b4c7b56849e7a95386d79db", package = "cyw43-pio", features = ["defmt"] }
 
+picoserve = { version = "0.23", features = ["tokio"] }
+
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
 cortex-m = { version = "0.7.6", features = ["inline-asm"] }
