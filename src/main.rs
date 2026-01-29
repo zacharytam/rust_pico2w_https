@@ -51,7 +51,8 @@ async fn http_server_task(stack: &'static embassy_net::Stack<'static>) {
     // Try to listen on port 80
     loop {
         info!("[HTTP] Creating socket...");
-        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+        // NOTE: Use *stack to dereference the reference
+        let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
         
         info!("[HTTP] Attempting to listen on port 80...");
         match socket.accept(80).await {
@@ -145,8 +146,8 @@ async fn main(spawner: Spawner) {
     
     info!("=== System Ready ===");
     info!("WiFi: {} / {}", WIFI_SSID, WIFI_PASSWORD);
-    info("Client must use static IP: 192.168.4.2/24");
-    info("Gateway: 192.168.4.1");
+    info!("Client must use static IP: 192.168.4.2/24");
+    info!("Gateway: 192.168.4.1");
     info!("Test URL: http://192.168.4.1");
     
     // Blink LED to show status
