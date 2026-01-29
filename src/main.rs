@@ -194,6 +194,7 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
                     &mut body_str,
                     "<html><head><title>Pico 2W LTE Gateway</title>\
                     <meta name='viewport' content='width=device-width, initial-scale=1'>\
+                    <meta http-equiv='refresh' content='5'>\
                     <style>\
                     body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}\
                     .container {{ max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}\
@@ -391,42 +392,16 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
     }
 }
 
-async fn read_uart_data(rx: &mut BufferedUartRx) {
-    let mut buf = [0u8; 256];
-    // FIXED: Use read() instead of try_read()
-    match rx.read(&mut buf).await {
-        Ok(n) if n > 0 => {
-            let mut rx_count = UART_RX_COUNT.lock().await;
-            *rx_count += n as u32;
-            
-            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                // Log unexpected data
-                if !s.trim().is_empty() {
-                    let mut data = EC800K_DATA.lock().await;
-                    // Keep buffer manageable
-                    if data.len() > 800 {
-                        let start = data.len() - 600;
-                        let mut tail = heapless::String::<600>::new();
-                        let _ = tail.push_str(&data[start..]);
-                        data.clear();
-                        let _ = data.push_str("...[truncated]...\n");
-                        let _ = data.push_str(tail.as_str());
-                    }
-                    let _ = data.push_str("<< ");
-                    let _ = data.push_str(s);
-                }
-            }
-        }
-        Ok(_) => {} // n == 0
-        Err(e) => warn!("UART read error: {:?}", e),
-    }
-}
-
 async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: &str) {
-    let mut status = EC800K_STATUS.lock().await;
-    *status = "Sending AT command...";
-    drop(status);
+    info!("Running AT test: {}", command);
     
+    // Update status
+    {
+        let mut status = EC800K_STATUS.lock().await;
+        *status = "Sending AT command...";
+    }
+    
+    // Add to data log
     {
         let mut data = EC800K_DATA.lock().await;
         let _ = data.push_str("\n=== AT TEST ===\n");
@@ -453,9 +428,12 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
     // Wait for response
     Timer::after(Duration::from_millis(500)).await;
     
+    // Read response with timeout
+    let mut response = heapless::String::<512>::new();
     let mut response_received = false;
-    for _ in 0..10 {
-        let mut buf = [0u8; 512];
+    
+    for attempt in 0..10 {
+        let mut buf = [0u8; 256];
         match rx.read(&mut buf).await {
             Ok(n) if n > 0 => {
                 response_received = true;
@@ -463,72 +441,136 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
                 *rx_count += n as u32;
                 
                 if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                    info!("AT Response: {}", s);
+                    info!("AT Response (attempt {}): {}", attempt + 1, s);
+                    let _ = response.push_str(s);
                     
-                    let mut data = EC800K_DATA.lock().await;
-                    let _ = data.push_str("<< ");
-                    let _ = data.push_str(s);
+                    // Update data log in real-time
+                    {
+                        let mut data = EC800K_DATA.lock().await;
+                        let _ = data.push_str("<< ");
+                        let _ = data.push_str(s);
+                        
+                        // Truncate if too long
+                        if data.len() > 800 {
+                            let start = data.len() - 600;
+                            let mut tail = heapless::String::<600>::new();
+                            let _ = tail.push_str(&data[start..]);
+                            data.clear();
+                            let _ = data.push_str("...[truncated]...\n");
+                            let _ = data.push_str(tail.as_str());
+                        }
+                    }
                     
-                    let mut status = EC800K_STATUS.lock().await;
-                    if s.contains("OK") {
-                        *status = "AT OK";
-                    } else if s.contains("ERROR") {
-                        *status = "AT ERROR";
-                    } else {
-                        *status = "AT Response received";
+                    // Check if we have a complete response
+                    if s.contains("OK") || s.contains("ERROR") || s.contains("\r\n") {
+                        break;
                     }
                 }
-                break;
             }
             _ => {}
         }
         Timer::after(Duration::from_millis(200)).await;
     }
     
-    if !response_received {
+    // Update status based on response
+    {
         let mut status = EC800K_STATUS.lock().await;
-        *status = "ERROR: No response to AT command";
-        let mut data = EC800K_DATA.lock().await;
-        let _ = data.push_str("<< NO RESPONSE\n");
+        if response.contains("OK") {
+            *status = "AT OK - Command successful";
+        } else if response.contains("ERROR") {
+            *status = "AT ERROR - Command failed";
+        } else if response_received {
+            *status = "AT Response received (no OK/ERROR)";
+        } else {
+            *status = "ERROR: No response from EC800K";
+            // Add error to data log
+            let mut data = EC800K_DATA.lock().await;
+            let _ = data.push_str("<< NO RESPONSE - Check wiring/baud rate\n");
+        }
     }
+    
+    info!("AT test completed");
 }
 
 async fn run_http_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
-    // Simplified HTTP test
-    let mut status = EC800K_STATUS.lock().await;
-    *status = "Starting HTTP test...";
-    drop(status);
+    info!("Running HTTP test");
+    
+    // Update status
+    {
+        let mut status = EC800K_STATUS.lock().await;
+        *status = "Starting HTTP test...";
+    }
     
     {
         let mut data = EC800K_DATA.lock().await;
         let _ = data.push_str("\n=== HTTP TEST ===\n");
     }
     
-    // Send AT command to check modem
-    let at_cmd = b"AT\r\n";
-    tx.write_all(at_cmd).await.ok();
-    Timer::after(Duration::from_millis(500)).await;
-    
-    // Clear any response
+    // Clear any pending data
     let mut buf = [0u8; 256];
     let _ = rx.read(&mut buf).await;
     
-    // For now, just update status
-    let mut status = EC800K_STATUS.lock().await;
-    *status = "HTTP test would connect to httpbin.org";
+    // Step 1: Test AT command first
+    info!("Step 1: Testing AT command");
+    let test_cmd = b"AT\r\n";
+    tx.write_all(test_cmd).await.ok();
     
+    {
+        let mut tx_count = UART_TX_COUNT.lock().await;
+        *tx_count += test_cmd.len() as u32;
+    }
+    
+    Timer::after(Duration::from_millis(500)).await;
+    
+    // Read response
+    let mut at_response = heapless::String::<256>::new();
+    match rx.read(&mut buf).await {
+        Ok(n) if n > 0 => {
+            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                info!("AT Response: {}", s);
+                at_response.push_str(s).ok();
+                
+                let mut data = EC800K_DATA.lock().await;
+                let _ = data.push_str(">> AT\\r\\n\n<< ");
+                let _ = data.push_str(s);
+            }
+        }
+        _ => {
+            info!("No response to AT command");
+        }
+    }
+    
+    // Update HTTP response with test results
     {
         let mut http_resp = HTTP_RESPONSE.lock().await;
         http_resp.clear();
-        let _ = http_resp.push_str("HTTP test triggered but not fully implemented in this version.\n");
-        let _ = http_resp.push_str("To fully implement, you would need to:\n");
-        let _ = http_resp.push_str("1. Initialize EC800K with APN (AT+CGDCONT=1,\"IP\",\"your_apn\")\n");
-        let _ = http_resp.push_str("2. Activate PDP context (AT+QIACT=1)\n");
-        let _ = http_resp.push_str("3. Open TCP connection (AT+QIOPEN=...)\n");
-        let _ = http_resp.push_str("4. Send HTTP request and read response\n");
+        
+        if at_response.contains("OK") {
+            let _ = http_resp.push_str("EC800K is responding to AT commands!\n\n");
+            let _ = http_resp.push_str("To actually fetch from httpbin.org, you need to:\n");
+            let _ = http_resp.push_str("1. Set APN for your SIM card (AT+CGDCONT=1,\"IP\",\"your_apn\")\n");
+            let _ = http_resp.push_str("2. Activate PDP context (AT+QIACT=1)\n");
+            let _ = http_resp.push_str("3. Open TCP connection (AT+QIOPEN=1,0,\"TCP\",\"httpbin.org\",80)\n");
+            let _ = http_resp.push_str("4. Send HTTP request (AT+QISEND=0,...)\n");
+            let _ = http_resp.push_str("5. Read response\n");
+            let _ = http_resp.push_str("\nAT response was: ");
+            let _ = http_resp.push_str(&at_response);
+            
+            let mut status = EC800K_STATUS.lock().await;
+            *status = "Ready for HTTP (APN needed)";
+        } else {
+            let _ = http_resp.push_str("EC800K not responding to AT commands.\n");
+            let _ = http_resp.push_str("Check:\n");
+            let _ = http_resp.push_str("1. Wiring: GP12→EC800K_RX, GP13←EC800K_TX\n");
+            let _ = http_resp.push_str("2. Power to EC800K module\n");
+            let _ = http_resp.push_str("3. Baud rate (115200)\n");
+            
+            let mut status = EC800K_STATUS.lock().await;
+            *status = "ERROR: No AT response";
+        }
     }
     
-    info!("HTTP test triggered (simplified version)");
+    info!("HTTP test completed");
 }
 
 #[embassy_executor::main]
@@ -558,7 +600,6 @@ async fn main(spawner: Spawner) {
     let state = STATE.init(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
     
-    // FIXED: Use expect() to unwrap the Result and pass SpawnToken to spawn()
     spawner.spawn(cyw43_task(runner).expect("Failed to spawn cyw43 task"));
 
     control.init(clm).await;
@@ -590,7 +631,6 @@ async fn main(spawner: Spawner) {
 
     let (uart_tx, uart_rx) = uart.split();
 
-    // FIXED: Use expect() to unwrap the Result
     spawner.spawn(uart_task(uart_tx, uart_rx).expect("Failed to spawn uart task"));
 
     // Configure network stack for AP mode with static IP
@@ -612,7 +652,6 @@ async fn main(spawner: Spawner) {
     );
     let stack = STACK.init(stack);
 
-    // FIXED: Use expect() to unwrap the Result
     spawner.spawn(net_task(runner).expect("Failed to spawn net task"));
 
     // Start WiFi AP
@@ -628,7 +667,6 @@ async fn main(spawner: Spawner) {
 
     // Spawn HTTP server
     info!("Starting HTTP server on port 80...");
-    // FIXED: Use expect() to unwrap the Result
     spawner.spawn(http_server_task(stack).expect("Failed to spawn HTTP server task"));
     info!("HTTP server task spawned");
 
