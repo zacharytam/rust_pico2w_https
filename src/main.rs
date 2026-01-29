@@ -75,7 +75,7 @@ static HTTP_REQUEST_TRIGGER: embassy_sync::signal::Signal<
 
 static AT_TEST_TRIGGER: embassy_sync::signal::Signal<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    &'static str,  // Will contain AT command to send
+    heapless::String<64>,  // Changed from &'static str to owned String
 > = embassy_sync::signal::Signal::new();
 
 static UART_TX_COUNT: embassy_sync::mutex::Mutex<
@@ -160,14 +160,16 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
                 HTTP_REQUEST_TRIGGER.signal(true);
             } else if path.contains("/trigger_at") {
                 info!("AT test triggered!");
-                AT_TEST_TRIGGER.signal("AT\r\n");  // Default AT command
+                let mut default_cmd = heapless::String::new();
+                let _ = default_cmd.push_str("AT\r\n");
+                AT_TEST_TRIGGER.signal(default_cmd);  // Pass owned String
             } else if path.contains("/at_cmd=") {
                 // Extract custom AT command from URL
                 if let Some(cmd_start) = path.find("at_cmd=") {
                     let cmd = &path[cmd_start + 7..];
                     let decoded_cmd = url_decode(cmd);
                     info!("Custom AT command: {}", decoded_cmd);
-                    AT_TEST_TRIGGER.signal(decoded_cmd.as_str());
+                    AT_TEST_TRIGGER.signal(decoded_cmd);  // Pass owned String
                 }
             }
 
@@ -370,31 +372,20 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
         // Wait for either HTTP trigger or AT trigger
         info!("Waiting for trigger...");
         
-        // Use select to wait for either trigger
-        let http_future = HTTP_REQUEST_TRIGGER.wait();
-        let at_future = AT_TEST_TRIGGER.wait();
+        // Use embassy_futures::select to wait for either signal
+        use embassy_futures::select;
         
-        // In Embassy, we can use select from embassy-futures, but for simplicity,
-        // we'll check them in sequence with a timeout
-        let trigger_type = embassy_time::with_timeout(
-            Duration::from_secs(1),
-            async {
-                embassy_futures::select::select(http_future, at_future).await
-            }
-        ).await;
-        
-        match trigger_type {
-            Ok(embassy_futures::select::Either::First(_)) => {
+        match select::select(
+            HTTP_REQUEST_TRIGGER.wait(),
+            AT_TEST_TRIGGER.wait()
+        ).await {
+            select::Either::First(_) => {
                 info!("HTTP test triggered!");
                 run_http_test(&mut tx, &mut rx).await;
             }
-            Ok(embassy_futures::select::Either::Second(at_cmd)) => {
-                info!("AT command triggered: {}", at_cmd);
-                run_at_test(&mut tx, &mut rx, at_cmd).await;
-            }
-            Err(_) => {
-                // Timeout - just read any incoming data
-                read_uart_data(&mut rx).await;
+            select::Either::Second(command) => {
+                info!("AT command triggered: {}", command);
+                run_at_test(&mut tx, &mut rx, command.as_str()).await;
             }
         }
     }
@@ -402,7 +393,8 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
 
 async fn read_uart_data(rx: &mut BufferedUartRx) {
     let mut buf = [0u8; 256];
-    match rx.try_read(&mut buf) {
+    // FIXED: Use read() instead of try_read()
+    match rx.read(&mut buf).await {
         Ok(n) if n > 0 => {
             let mut rx_count = UART_RX_COUNT.lock().await;
             *rx_count += n as u32;
@@ -425,7 +417,8 @@ async fn read_uart_data(rx: &mut BufferedUartRx) {
                 }
             }
         }
-        _ => {}
+        Ok(_) => {} // n == 0
+        Err(e) => warn!("UART read error: {:?}", e),
     }
 }
 
@@ -501,7 +494,7 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
 }
 
 async fn run_http_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
-    // Similar to your original HTTP test, but simplified
+    // Simplified HTTP test
     let mut status = EC800K_STATUS.lock().await;
     *status = "Starting HTTP test...";
     drop(status);
@@ -564,7 +557,7 @@ async fn main(spawner: Spawner) {
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
-    spawner.spawn(cyw43_task(runner).unwrap());
+    spawner.spawn(cyw43_task(runner)).unwrap();
 
     control.init(clm).await;
     control
@@ -595,7 +588,7 @@ async fn main(spawner: Spawner) {
 
     let (uart_tx, uart_rx) = uart.split();
 
-    spawner.spawn(uart_task(uart_tx, uart_rx).unwrap());
+    spawner.spawn(uart_task(uart_tx, uart_rx)).unwrap();
 
     // Configure network stack for AP mode with static IP
     let config = Config::ipv4_static(embassy_net::StaticConfigV4 {
@@ -616,7 +609,7 @@ async fn main(spawner: Spawner) {
     );
     let stack = STACK.init(stack);
 
-    spawner.spawn(net_task(runner).unwrap());
+    spawner.spawn(net_task(runner)).unwrap();
 
     // Start WiFi AP
     info!("Starting WiFi AP...");
@@ -631,7 +624,7 @@ async fn main(spawner: Spawner) {
 
     // Spawn HTTP server
     info!("Starting HTTP server on port 80...");
-    spawner.spawn(http_server_task(stack).unwrap());
+    spawner.spawn(http_server_task(stack)).unwrap();
     info!("HTTP server task spawned");
 
     info!("==========================================");
