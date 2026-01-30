@@ -64,7 +64,7 @@ static AT_COMMAND_SIGNAL: embassy_sync::signal::Signal<
 
 static HTTP_GET_SIGNAL: embassy_sync::signal::Signal<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    bool,
+    (),
 > = embassy_sync::signal::Signal::new();
 
 #[embassy_executor::task]
@@ -142,7 +142,7 @@ async fn http_server_task(stack: &'static Stack<'static>) {
         
         if trigger_http_get {
             info!("Triggering HTTP GET request");
-            HTTP_GET_SIGNAL.signal(true);
+            HTTP_GET_SIGNAL.signal(());
         }
     }
 }
@@ -332,32 +332,19 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
     
     // 主循环
     loop {
-        // 等待信号 - 普通AT命令或HTTP GET请求
+        // 等待信号 - 使用select等待AT命令或HTTP GET请求
         use embassy_futures::select::{select, Either};
         
-        match select(
-            select(AT_COMMAND_SIGNAL.wait(), HTTP_GET_SIGNAL.wait()),
-            Timer::after(Duration::from_millis(100))
-        ).await {
-            Either::First(trigger_result) => {
-                match trigger_result {
-                    Either::First(cmd) => {
-                        // 普通AT命令
-                        handle_at_command(&mut tx, &mut rx, cmd.as_str()).await;
-                    }
-                    Either::Second(_) => {
-                        // HTTP GET请求
-                        perform_http_get(&mut tx, &mut rx).await;
-                    }
-                }
+        match select(AT_COMMAND_SIGNAL.wait(), HTTP_GET_SIGNAL.wait()).await {
+            Either::First(cmd) => {
+                // 普通AT命令
+                handle_at_command(&mut tx, &mut rx, cmd.as_str()).await;
             }
             Either::Second(_) => {
-                // 超时，检查是否有数据可读
-                check_for_incoming_data(&mut rx).await;
+                // HTTP GET请求
+                perform_http_get(&mut tx, &mut rx).await;
             }
         }
-        
-        Timer::after(Duration::from_millis(10)).await;
     }
 }
 
@@ -381,21 +368,25 @@ async fn handle_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, com
             tx.flush().await.ok();
             
             // 等待响应
-            Timer::after(Duration::from_millis(300)).await;
+            Timer::after(Duration::from_millis(200)).await;
             
             // 读取响应
             let mut response = heapless::String::<1024>::new();
             let mut received = false;
+            let mut total_bytes = 0;
             
-            for _ in 0..10 {
+            // 尝试读取多次，因为响应可能分多次到达
+            for attempt in 0..10 {
                 let mut buf = [0u8; 256];
                 match rx.read(&mut buf).await {
                     Ok(n) if n > 0 => {
                         received = true;
+                        total_bytes += n;
                         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                            info!("Response: {}", s);
+                            info!("Response chunk {}: {}", attempt + 1, s);
                             let _ = response.push_str(s);
                             
+                            // 如果收到OK或ERROR，可以提前结束
                             if s.contains("OK") || s.contains("ERROR") {
                                 break;
                             }
@@ -404,7 +395,8 @@ async fn handle_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, com
                     _ => {}
                 }
                 
-                Timer::after(Duration::from_millis(100)).await;
+                // 如果已经收到一些数据但还没结束，继续等待
+                Timer::after(Duration::from_millis(50)).await;
             }
             
             // 更新结果
@@ -415,12 +407,29 @@ async fn handle_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, com
                 if received {
                     let _ = result.push_str("📤 Command:\n");
                     let _ = result.push_str(command.trim());
-                    let _ = result.push_str("\n\n📥 Response:\n");
+                    let _ = result.push_str("\n\n📥 Response (");
+                    // 添加字节数显示
+                    let mut bytes_str = heapless::String::<10>::new();
+                    let _ = write_u32(&mut bytes_str, total_bytes as u32);
+                    let _ = result.push_str(bytes_str.as_str());
+                    let _ = result.push_str(" bytes):\n");
                     let _ = result.push_str(&response);
+                    
+                    if response.contains("OK") {
+                        let _ = result.push_str("\n\n✅ Command successful!");
+                    } else if response.contains("ERROR") {
+                        let _ = result.push_str("\n\n❌ Command failed");
+                    } else if response.trim().is_empty() {
+                        let _ = result.push_str("\n\n⚠️ Empty response");
+                    }
                 } else {
                     let _ = result.push_str("📤 Command:\n");
                     let _ = result.push_str(command.trim());
                     let _ = result.push_str("\n\n❌ No response received\n");
+                    let _ = result.push_str("Possible issues:\n");
+                    let _ = result.push_str("1. Check UART wiring (GP12→RX, GP13←TX)\n");
+                    let _ = result.push_str("2. EC800K might be busy or not powered\n");
+                    let _ = result.push_str("3. Try resetting the EC800K module\n");
                 }
             }
         }
@@ -429,8 +438,36 @@ async fn handle_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, com
             let mut result = AT_RESULT.lock().await;
             result.clear();
             let _ = result.push_str("❌ Failed to send AT command\n");
+            let _ = result.push_str("Error: ");
+            // 这里需要将错误转换为字符串，简单处理
+            let _ = result.push_str("UART write error");
         }
     }
+    
+    info!("AT command processing complete");
+}
+
+// 辅助函数：将u32写入字符串
+fn write_u32(s: &mut heapless::String<10>, n: u32) -> Result<(), ()> {
+    let mut buffer = heapless::Vec::<u8, 10>::new();
+    let mut n = n;
+    
+    if n == 0 {
+        let _ = s.push_str("0");
+        return Ok(());
+    }
+    
+    while n > 0 {
+        let digit = (n % 10) as u8 + b'0';
+        let _ = buffer.push(digit);
+        n /= 10;
+    }
+    
+    for &digit in buffer.iter().rev() {
+        let _ = s.push(digit as char);
+    }
+    
+    Ok(())
 }
 
 async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
@@ -685,7 +722,14 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
 async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: &str, description: &str, step: u8, total_steps: u8) -> bool {
     {
         let mut result = AT_RESULT.lock().await;
-        let _ = write_to_string(&mut *result, step, total_steps, description, "\nStep {}/{}: {}...\n");
+        // 手动格式化字符串，避免使用format!
+        let _ = result.push_str("\nStep ");
+        let _ = push_u8_to_string(&mut *result, step);
+        let _ = result.push_str("/");
+        let _ = push_u8_to_string(&mut *result, total_steps);
+        let _ = result.push_str(": ");
+        let _ = result.push_str(description);
+        let _ = result.push_str("...\n");
     }
     
     match tx.write_all(cmd.as_bytes()).await {
@@ -719,7 +763,9 @@ async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: 
                             } else if s.contains("ERROR") {
                                 {
                                     let mut result = AT_RESULT.lock().await;
-                                    let _ = write_to_string(&mut *result, 0, 0, description, "\n❌ {} failed\n");
+                                    let _ = result.push_str("\n❌ ");
+                                    let _ = result.push_str(description);
+                                    let _ = result.push_str(" failed\n");
                                 }
                                 return false;
                             }
@@ -733,7 +779,9 @@ async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: 
             if !received {
                 {
                     let mut result = AT_RESULT.lock().await;
-                    let _ = write_to_string(&mut *result, 0, 0, description, "\n⚠️ No response for {}\n");
+                    let _ = result.push_str("\n⚠️ No response for ");
+                    let _ = result.push_str(description);
+                    let _ = result.push_str("\n");
                 }
             }
             
@@ -742,42 +790,15 @@ async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: 
         Err(e) => {
             error!("Failed to send {} command: {:?}", description, e);
             let mut result = AT_RESULT.lock().await;
-            let _ = write_to_string(&mut *result, 0, 0, description, "\n❌ Failed to send {} command\n");
+            let _ = result.push_str("\n❌ Failed to send ");
+            let _ = result.push_str(description);
+            let _ = result.push_str(" command\n");
             false
         }
     }
 }
 
-fn write_to_string(string: &mut heapless::String<2048>, step: u8, total_steps: u8, description: &str, format_str: &str) {
-    // 手动格式化字符串
-    if format_str.contains("Step") {
-        // 格式化 "Step {}/{}: {}...\n"
-        let _ = string.push_str("\nStep ");
-        let _ = push_u8(string, step);
-        let _ = string.push_str("/");
-        let _ = push_u8(string, total_steps);
-        let _ = string.push_str(": ");
-        let _ = string.push_str(description);
-        let _ = string.push_str("...\n");
-    } else if format_str.contains("failed") {
-        // 格式化 "\n❌ {} failed\n"
-        let _ = string.push_str("\n❌ ");
-        let _ = string.push_str(description);
-        let _ = string.push_str(" failed\n");
-    } else if format_str.contains("No response") {
-        // 格式化 "\n⚠️ No response for {}\n"
-        let _ = string.push_str("\n⚠️ No response for ");
-        let _ = string.push_str(description);
-        let _ = string.push_str("\n");
-    } else if format_str.contains("Failed to send") {
-        // 格式化 "\n❌ Failed to send {} command\n"
-        let _ = string.push_str("\n❌ Failed to send ");
-        let _ = string.push_str(description);
-        let _ = string.push_str(" command\n");
-    }
-}
-
-fn push_u8(string: &mut heapless::String<2048>, value: u8) {
+fn push_u8_to_string(string: &mut heapless::String<2048>, value: u8) {
     if value >= 100 {
         let _ = string.push((b'0' + value / 100) as char);
         let _ = string.push((b'0' + (value / 10) % 10) as char);
@@ -787,20 +808,6 @@ fn push_u8(string: &mut heapless::String<2048>, value: u8) {
         let _ = string.push((b'0' + value % 10) as char);
     } else {
         let _ = string.push((b'0' + value) as char);
-    }
-}
-
-async fn check_for_incoming_data(rx: &mut BufferedUartRx) {
-    let mut buf = [0u8; 256];
-    match rx.read(&mut buf).await {
-        Ok(n) if n > 0 => {
-            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                if !s.trim().is_empty() {
-                    info!("Unsolicited data: {}", s);
-                }
-            }
-        }
-        _ => {}
     }
 }
 
@@ -845,13 +852,17 @@ async fn main(spawner: Spawner) {
 
     let mut uart_config = UartConfig::default();
     uart_config.baudrate = 921600;
+    // 确保使用正确的数据位、停止位等
+    uart_config.data_bits = embassy_rp::uart::DataBits::DataBits8;
+    uart_config.stop_bits = embassy_rp::uart::StopBits::STOP1;
+    uart_config.parity = embassy_rp::uart::Parity::ParityNone;
 
     info!("Configuring UART at 921600 baud...");
     
     let uart = BufferedUart::new(
         p.UART0,
-        p.PIN_12,
-        p.PIN_13,
+        p.PIN_12,  // TX -> EC800K RX
+        p.PIN_13,  // RX <- EC800K TX
         Irqs,
         uart_tx_buf,
         uart_rx_buf,
