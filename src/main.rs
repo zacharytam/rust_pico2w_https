@@ -54,8 +54,8 @@ async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'sta
 // Global state for web interface
 static EC800K_STATUS: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    heapless::String<64>,
-> = embassy_sync::mutex::Mutex::new(heapless::String::new());
+    &str,
+> = embassy_sync::mutex::Mutex::new("Initializing...");
 
 static EC800K_DATA: embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -159,77 +159,45 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let path = parts[1];
             info!("Method: {}, Path: {}", method, path);
 
-            // Handle button triggers - IMMEDIATE REDIRECT
-            let mut should_redirect = false;
-            let mut trigger_type = "";
-            
+            // Handle button triggers
             if path.contains("/trigger_http") {
                 info!("HTTP request triggered!");
-                trigger_type = "http";
-                should_redirect = true;
+                {
+                    let mut progress = ACTION_IN_PROGRESS.lock().await;
+                    progress.clear();
+                    let _ = progress.push_str("🔄 Fetching httpbin.org...");
+                }
+                HTTP_REQUEST_TRIGGER.signal(true);
             } else if path.contains("/trigger_at") {
                 info!("AT test triggered!");
-                trigger_type = "at";
-                should_redirect = true;
+                {
+                    let mut progress = ACTION_IN_PROGRESS.lock().await;
+                    progress.clear();
+                    let _ = progress.push_str("🔄 Sending AT...");
+                }
+                let mut default_cmd = heapless::String::new();
+                let _ = default_cmd.push_str("AT\r\n");
+                AT_TEST_TRIGGER.signal(default_cmd);
             } else if path.contains("/at_cmd=") {
                 if let Some(cmd_start) = path.find("at_cmd=") {
                     let cmd = &path[cmd_start + 7..];
                     let decoded_cmd = url_decode(cmd);
                     info!("Custom AT command: {}", decoded_cmd);
-                    trigger_type = "at_custom";
-                    should_redirect = true;
+                    {
+                        let mut progress = ACTION_IN_PROGRESS.lock().await;
+                        progress.clear();
+                        let _ = progress.push_str("🔄 Sending ");
+                        let _ = progress.push_str(cmd);
+                        if progress.len() > 40 {
+                            progress.truncate(40);
+                            let _ = progress.push_str("...");
+                        }
+                    }
+                    AT_TEST_TRIGGER.signal(decoded_cmd);
                 }
             }
 
-            if should_redirect {
-                // Send immediate redirect first
-                let response = "HTTP/1.1 302 Found\r\nLocation: /\r\n\r\n";
-                socket.write_all(response.as_bytes()).await?;
-                socket.flush().await?;
-                
-                // Then trigger the action (after response is sent)
-                match trigger_type {
-                    "http" => {
-                        {
-                            let mut progress = ACTION_IN_PROGRESS.lock().await;
-                            progress.clear();
-                            let _ = progress.push_str("🔄 Fetching httpbin.org...");
-                        }
-                        HTTP_REQUEST_TRIGGER.signal(true);
-                    }
-                    "at" => {
-                        {
-                            let mut progress = ACTION_IN_PROGRESS.lock().await;
-                            progress.clear();
-                            let _ = progress.push_str("🔄 Sending AT...");
-                        }
-                        let mut default_cmd = heapless::String::new();
-                        let _ = default_cmd.push_str("AT\r\n");
-                        AT_TEST_TRIGGER.signal(default_cmd);
-                    }
-                    "at_custom" => {
-                        if let Some(cmd_start) = path.find("at_cmd=") {
-                            let cmd = &path[cmd_start + 7..];
-                            let decoded_cmd = url_decode(cmd);
-                            {
-                                let mut progress = ACTION_IN_PROGRESS.lock().await;
-                                progress.clear();
-                                let _ = progress.push_str("🔄 Sending ");
-                                let _ = progress.push_str(cmd);
-                                if progress.len() > 40 {
-                                    progress.truncate(40);
-                                    let _ = progress.push_str("...");
-                                }
-                            }
-                            AT_TEST_TRIGGER.signal(decoded_cmd);
-                        }
-                    }
-                    _ => {}
-                }
-                return Ok(());
-            }
-
-            // Get status for normal page view
+            // Get status
             let status = EC800K_STATUS.lock().await;
             let data = EC800K_DATA.lock().await;
             let tx_count = UART_TX_COUNT.lock().await;
@@ -238,7 +206,7 @@ async fn handle_client(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tc
             let progress = ACTION_IN_PROGRESS.lock().await;
 
             let html = format_html_response(
-                status.as_str(),
+                *status,
                 *tx_count,
                 *rx_count,
                 http_resp.as_str(),
@@ -268,9 +236,8 @@ fn format_html_response(
 ) -> heapless::String<4096> {
     let mut html = heapless::String::new();
     
-    let status_display = if status.is_empty() { "Initializing EC800K..." } else { status };
-    let status_color = if status_display.contains("ERROR") { "red" } 
-        else if status_display.contains("Ready") || status_display.contains("OK") || status_display.contains("complete") { "green" } 
+    let status_color = if status.contains("ERROR") { "red" } 
+        else if status.contains("Ready") || status.contains("OK") { "green" } 
         else { "orange" };
     
     let http_display = if http_response.is_empty() { "[No HTTP response yet]" } else { http_response };
@@ -284,7 +251,7 @@ fn format_html_response(
     let _ = html.push_str("<!DOCTYPE html><html><head>");
     let _ = html.push_str("<title>Pico 2W LTE Gateway</title>");
     let _ = html.push_str("<meta name='viewport' content='width=device-width, initial-scale=1'>");
-    let _ = html.push_str("<meta http-equiv='refresh' content='2'>");  // 2 seconds refresh
+    let _ = html.push_str("<meta http-equiv='refresh' content='1'>");
     let _ = html.push_str("<style>");
     let _ = html.push_str("body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }");
     let _ = html.push_str(".container { max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }");
@@ -302,17 +269,7 @@ fn format_html_response(
     let _ = html.push_str(".section { margin: 20px 0; padding: 15px; background: #fafafa; border-radius: 5px; }");
     let _ = html.push_str(".form-group { margin: 10px 0; }");
     let _ = html.push_str("input[type='text'] { width: 300px; padding: 8px; margin-right: 10px; border: 1px solid #ccc; border-radius: 4px; }");
-    let _ = html.push_str("</style>");
-    let _ = html.push_str("<script>");
-    let _ = html.push_str("window.onload = function() {");
-    let _ = html.push_str("  // Auto-scroll to bottom of UART log");
-    let _ = html.push_str("  var preElements = document.getElementsByTagName('pre');");
-    let _ = html.push_str("  for(var i = 0; i < preElements.length; i++) {");
-    let _ = html.push_str("    preElements[i].scrollTop = preElements[i].scrollHeight;");
-    let _ = html.push_str("  }");
-    let _ = html.push_str("}");
-    let _ = html.push_str("</script>");
-    let _ = html.push_str("</head><body>");
+    let _ = html.push_str("</style></head><body>");
     
     let _ = html.push_str("<div class='container'>");
     let _ = html.push_str("<h1>Pico 2W LTE Gateway</h1>");
@@ -323,7 +280,7 @@ fn format_html_response(
         let _ = html.push_str("<strong>⏳ ");
         let _ = html.push_str(progress);
         let _ = html.push_str("</strong><br>");
-        let _ = html.push_str("<small>Page refreshes every 2 seconds...</small>");
+        let _ = html.push_str("<small>Page refreshes every second...</small>");
         let _ = html.push_str("</div>");
     }
     
@@ -332,7 +289,7 @@ fn format_html_response(
     let _ = html.push_str("<p><b>EC800K Status:</b> <span style='color:");
     let _ = html.push_str(status_color);
     let _ = html.push_str("'>");
-    let _ = html.push_str(status_display);
+    let _ = html.push_str(status);
     let _ = html.push_str("</span></p>");
     let _ = html.push_str("<p><b>UART Stats:</b> TX: ");
     let _ = write_u32(&mut html, tx_count);
@@ -345,17 +302,25 @@ fn format_html_response(
     let _ = html.push_str(WIFI_PASSWORD);
     let _ = html.push_str(")</p>");
     let _ = html.push_str("<p><b>Your IP:</b> 192.168.4.2 (set manually)</p>");
-    let _ = html.push_str("<p><i>Page auto-refreshes every 2 seconds</i></p>");
+    let _ = html.push_str("<p><i>Page auto-refreshes every second</i></p>");
     let _ = html.push_str("</div>");
     
     // Button section
     let _ = html.push_str("<div class='section'>");
     let _ = html.push_str("<h2>Quick Actions</h2>");
     let _ = html.push_str("<div class='button-group'>");
-    let _ = html.push_str("<a href='/trigger_http'><button class='btn-http'>📡 Fetch httpbin.org/get</button></a>");
-    let _ = html.push_str("<a href='/trigger_at'><button class='btn-at'>📶 Test AT Command</button></a>");
-    let _ = html.push_str("<a href='/at_cmd=AT+CSQ'><button class='btn-at2'>📶 AT+CSQ (Signal)</button></a>");
-    let _ = html.push_str("<a href='/at_cmd=AT+CREG?'><button class='btn-at3'>📶 AT+CREG? (Network)</button></a>");
+    let _ = html.push_str("<form action='/trigger_http' method='get'>");
+    let _ = html.push_str("<button class='btn-http' type='submit'>📡 Fetch httpbin.org/get</button>");
+    let _ = html.push_str("</form>");
+    let _ = html.push_str("<form action='/trigger_at' method='get'>");
+    let _ = html.push_str("<button class='btn-at' type='submit'>📶 Test AT Command</button>");
+    let _ = html.push_str("</form>");
+    let _ = html.push_str("<form action='/at_cmd=AT+CSQ' method='get'>");
+    let _ = html.push_str("<button class='btn-at2' type='submit'>📶 AT+CSQ (Signal)</button>");
+    let _ = html.push_str("</form>");
+    let _ = html.push_str("<form action='/at_cmd=AT+CREG?' method='get'>");
+    let _ = html.push_str("<button class='btn-at3' type='submit'>📶 AT+CREG? (Network)</button>");
+    let _ = html.push_str("</form>");
     let _ = html.push_str("</div>");
     
     // Custom command form
@@ -391,7 +356,7 @@ fn format_html_response(
     let _ = html.push_str("<li><b>EC800K RX</b> → GP12 (UART0 TX)</li>");
     let _ = html.push_str("<li><b>EC800K GND</b> → GND</li>");
     let _ = html.push_str("<li><b>EC800K VCC</b> → 3.3V (check module)</li>");
-    let _ = html.push_str("<li><b>Refresh:</b> Auto-updates every 2 seconds</li>");
+    let _ = html.push_str("<li><b>Refresh:</b> Auto-updates every second</li>");
     let _ = html.push_str("</ul>");
     let _ = html.push_str("</div>");
     
@@ -454,15 +419,14 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
     
     {
         let mut status = EC800K_STATUS.lock().await;
-        status.clear();
-        let _ = status.push_str("Initializing EC800K...");
+        *status = "Initializing EC800K...";
     }
     
     {
         let mut data = EC800K_DATA.lock().await;
         let _ = data.push_str("=== EC800K LTE Modem ===\n");
         let _ = data.push_str("Pins: GP12(TX)→EC800K_RX, GP13(RX)←EC800K_TX\n");
-        let _ = data.push_str("Baud: 921600 (default)\n");
+        let _ = data.push_str("Baud: 115200 (default)\n");
         let _ = data.push_str("Waiting for modem...\n");
     }
     
@@ -481,8 +445,7 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                     
                     if s.contains("RDY") || s.contains("READY") {
                         let mut status = EC800K_STATUS.lock().await;
-                        status.clear();
-                        let _ = status.push_str("Boot complete - Ready");
+                        *status = "Boot complete";
                     }
                 }
             }
@@ -493,34 +456,32 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
     
     {
         let mut status = EC800K_STATUS.lock().await;
-        if status.is_empty() {
-            let _ = status.push_str("Ready - click buttons to test");
-        }
+        *status = "Ready - click buttons to test";
     }
     
-    // Main loop
     loop {
-        use embassy_futures::select::{select, Either};
+        use embassy_futures::select;
         
-        // Wait for either trigger with timeout
-        match select(
-            select(HTTP_REQUEST_TRIGGER.wait(), AT_TEST_TRIGGER.wait()),
+        match select::select(
+            embassy_futures::select::select(
+                HTTP_REQUEST_TRIGGER.wait(),
+                AT_TEST_TRIGGER.wait()
+            ),
             Timer::after(Duration::from_millis(100))
         ).await {
-            Either::First(trigger_result) => {
+            select::Either::First(trigger_result) => {
                 match trigger_result {
-                    Either::First(_) => {
+                    select::Either::First(_) => {
                         info!("HTTP test triggered!");
                         run_http_test(&mut tx, &mut rx).await;
                     }
-                    Either::Second(cmd) => {
-                        info!("AT command triggered: {}", cmd);
-                        run_at_test(&mut tx, &mut rx, cmd.as_str()).await;
+                    select::Either::Second(command) => {
+                        info!("AT command triggered: {}", command);
+                        run_at_test(&mut tx, &mut rx, command.as_str()).await;
                     }
                 }
             }
-            Either::Second(_) => {
-                // Timeout, just check for incoming data
+            select::Either::Second(_) => {
                 check_for_incoming_data(&mut rx).await;
             }
         }
@@ -562,8 +523,7 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
     
     {
         let mut status = EC800K_STATUS.lock().await;
-        status.clear();
-        let _ = status.push_str("Sending AT command...");
+        *status = "Sending AT command...";
     }
     
     {
@@ -583,8 +543,7 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
         Err(e) => {
             warn!("Failed to send AT command: {:?}", e);
             let mut status = EC800K_STATUS.lock().await;
-            status.clear();
-            let _ = status.push_str("ERROR: Send failed");
+            *status = "ERROR: Send failed";
             {
                 let mut progress = ACTION_IN_PROGRESS.lock().await;
                 progress.clear();
@@ -593,7 +552,6 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
         }
     }
     
-    tx.flush().await.ok();
     Timer::after(Duration::from_millis(100)).await;
     
     let mut response = heapless::String::<512>::new();
@@ -617,7 +575,7 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
                         let _ = data.push_str(s);
                     }
                     
-                    if s.contains("OK") || s.contains("ERROR") || s.contains("+CSQ") || s.contains("+CREG") {
+                    if s.contains("OK") || s.contains("ERROR") {
                         break;
                     }
                 }
@@ -625,37 +583,19 @@ async fn run_at_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, command: 
             _ => {}
         }
         
-        Timer::after(Duration::from_millis(100)).await;
+        Timer::after(Duration::from_millis(50)).await;
     }
     
     {
         let mut status = EC800K_STATUS.lock().await;
-        status.clear();
-        
         if response.contains("OK") {
-            let _ = status.push_str("✅ AT OK");
+            *status = "AT OK - Command successful";
         } else if response.contains("ERROR") {
-            let _ = status.push_str("❌ AT ERROR");
-        } else if response.contains("+CSQ") {
-            let _ = status.push_str("📶 Signal: ");
-            if let Some(csq_start) = response.find("+CSQ:") {
-                let csq_value = &response[csq_start + 5..];
-                if let Some(end) = csq_value.find(',') {
-                    let _ = status.push_str(&csq_value[..end]);
-                }
-            }
-        } else if response.contains("+CREG") {
-            let _ = status.push_str("📡 Network reg: ");
-            if let Some(creg_start) = response.find("+CREG:") {
-                let creg_value = &response[creg_start + 6..];
-                if let Some(end) = creg_value.find(',') {
-                    let _ = status.push_str(&creg_value[..end]);
-                }
-            }
+            *status = "AT ERROR - Command failed";
         } else if response_received {
-            let _ = status.push_str("📨 Response received");
+            *status = "AT Response received";
         } else {
-            let _ = status.push_str("⚠️ No response - check wiring");
+            *status = "No response from EC800K";
             let mut data = EC800K_DATA.lock().await;
             let _ = data.push_str("<< NO RESPONSE - Check wiring/baud rate\n");
         }
@@ -673,8 +613,7 @@ async fn run_http_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
     
     {
         let mut status = EC800K_STATUS.lock().await;
-        status.clear();
-        let _ = status.push_str("Testing EC800K...");
+        *status = "Testing EC800K connection...";
     }
     
     {
@@ -682,12 +621,9 @@ async fn run_http_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
         let _ = data.push_str("\n=== HTTP TEST ===\n");
     }
     
-    // Clear any pending data
     let mut buf = [0u8; 256];
     let _ = rx.read(&mut buf).await;
     
-    // Test AT command
-    info!("Testing AT command");
     let test_cmd = b"AT\r\n";
     if tx.write_all(test_cmd).await.is_err() {
         warn!("Failed to send AT command");
@@ -703,7 +639,6 @@ async fn run_http_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
         *tx_count += test_cmd.len() as u32;
     }
     
-    tx.flush().await.ok();
     Timer::after(Duration::from_millis(500)).await;
     
     let mut at_response = heapless::String::<256>::new();
@@ -729,32 +664,27 @@ async fn run_http_test(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
         
         if at_response.contains("OK") {
             let _ = http_resp.push_str("✅ EC800K is responding to AT commands!\n\n");
-            let _ = http_resp.push_str("AT response:\n");
+            let _ = http_resp.push_str("To fetch from httpbin.org, you need to:\n");
+            let _ = http_resp.push_str("1. Set your APN: AT+CGDCONT=1,\"IP\",\"your_apn\"\n");
+            let _ = http_resp.push_str("2. Activate context: AT+QIACT=1\n");
+            let _ = http_resp.push_str("3. Open connection: AT+QIOPEN=1,0,\"TCP\",\"httpbin.org\",80\n");
+            let _ = http_resp.push_str("4. Send HTTP request\n");
+            let _ = http_resp.push_str("\nAT response: ");
             let _ = http_resp.push_str(&at_response);
-            let _ = http_resp.push_str("\n\nTo fetch httpbin.org, send:\n");
-            let _ = http_resp.push_str("1. AT+CGDCONT=1,\"IP\",\"your_apn\"\n");
-            let _ = http_resp.push_str("2. AT+QIACT=1\n");
-            let _ = http_resp.push_str("3. AT+QIOPEN=1,0,\"TCP\",\"httpbin.org\",80\n");
-            let _ = http_resp.push_str("4. AT+QISEND=0,<length>\n");
-            let _ = http_resp.push_str("5. GET /get HTTP/1.1\\r\\nHost: httpbin.org\\r\\n\\r\\n");
             
             {
                 let mut status = EC800K_STATUS.lock().await;
-                status.clear();
-                let _ = status.push_str("✅ EC800K Ready");
+                *status = "Ready - AT working";
             }
         } else {
             let _ = http_resp.push_str("❌ EC800K not responding\n");
             let _ = http_resp.push_str("Check wiring and power\n");
             let _ = http_resp.push_str("GP12 → EC800K RX\n");
             let _ = http_resp.push_str("GP13 ← EC800K TX\n");
-            let _ = http_resp.push_str("GND → GND\n");
-            let _ = http_resp.push_str("3.3V → VCC\n");
             
             {
                 let mut status = EC800K_STATUS.lock().await;
-                status.clear();
-                let _ = status.push_str("❌ No AT response");
+                *status = "ERROR: No AT response";
             }
         }
         
@@ -804,7 +734,7 @@ async fn main(spawner: Spawner) {
     let uart_rx_buf = UART_RX_BUF.init([0u8; 2048]);
 
     let mut uart_config = UartConfig::default();
-    uart_config.baudrate = 921600;
+    uart_config.baudrate = 115200;
 
     let uart = BufferedUart::new(
         p.UART0,
