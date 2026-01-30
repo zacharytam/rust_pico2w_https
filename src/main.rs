@@ -59,7 +59,7 @@ static AT_RESULT: embassy_sync::mutex::Mutex<
 
 static AT_COMMAND_SIGNAL: embassy_sync::signal::Signal<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    heapless::String<32>,
+    heapless::String<64>,
 > = embassy_sync::signal::Signal::new();
 
 #[embassy_executor::task]
@@ -93,9 +93,11 @@ async fn http_server_task(stack: &'static Stack<'static>) {
         let request = core::str::from_utf8(&buf[..n]).unwrap_or("");
         
         // 解析请求路径
-        let mut cmd_to_send = heapless::String::<32>::new();
+        let mut cmd_to_send = heapless::String::<64>::new();
+        let mut immediate_refresh = false;
         
         if request.starts_with("GET /at?cmd=") {
+            immediate_refresh = true;
             if let Some(start) = request.find("cmd=") {
                 let query = &request[start+4..];
                 if let Some(end) = query.find(' ') {
@@ -106,17 +108,18 @@ async fn http_server_task(stack: &'static Stack<'static>) {
                     let cmd = &query[..end];
                     let decoded = decode_url(cmd);
                     cmd_to_send = decoded;
+                } else if !query.is_empty() {
+                    let decoded = decode_url(query);
+                    cmd_to_send = decoded;
                 }
             }
-        } else if request.starts_with("GET / ") || request.starts_with("GET /index") {
-            // 首页请求，不发送命令
         }
 
         // 获取当前结果
         let result = AT_RESULT.lock().await;
         
         // 构建响应
-        let html = format_response(result.as_str());
+        let html = format_response(result.as_str(), immediate_refresh);
         
         // 发送响应
         let _ = socket.write_all(html.as_bytes()).await;
@@ -130,7 +133,7 @@ async fn http_server_task(stack: &'static Stack<'static>) {
     }
 }
 
-fn format_response(result: &str) -> heapless::String<2048> {
+fn format_response(result: &str, immediate_refresh: bool) -> heapless::String<4096> {
     let mut html = heapless::String::new();
     
     let _ = html.push_str("HTTP/1.1 200 OK\r\n");
@@ -140,62 +143,84 @@ fn format_response(result: &str) -> heapless::String<2048> {
     let _ = html.push_str("<!DOCTYPE html><html><head>");
     let _ = html.push_str("<title>EC800K AT Tester</title>");
     let _ = html.push_str("<meta name='viewport' content='width=device-width, initial-scale=1'>");
-    let _ = html.push_str("<meta http-equiv='refresh' content='3'>"); // 每3秒刷新
+    
+    if !immediate_refresh {
+        // 正常页面：5秒刷新一次
+        let _ = html.push_str("<meta http-equiv='refresh' content='5'>");
+    }
+    
     let _ = html.push_str("<style>");
-    let _ = html.push_str("body { font-family: Arial, sans-serif; margin: 20px; }");
-    let _ = html.push_str("h1 { color: #333; }");
-    let _ = html.push_str(".container { max-width: 800px; margin: auto; }");
-    let _ = html.push_str("input[type='text'] { width: 300px; padding: 10px; font-size: 16px; }");
-    let _ = html.push_str("button { padding: 10px 20px; font-size: 16px; background: #4CAF50; color: white; border: none; cursor: pointer; }");
-    let _ = html.push_str(".btn { margin: 5px; padding: 8px 16px; background: #2196F3; color: white; text-decoration: none; display: inline-block; }");
-    let _ = html.push_str("pre { background: #f5f5f5; padding: 15px; border-radius: 5px; overflow: auto; white-space: pre-wrap; }");
-    let _ = html.push_str(".success { color: green; }");
-    let _ = html.push_str(".error { color: red; }");
+    let _ = html.push_str("body { font-family: Arial, sans-serif; margin: 20px; background: #f0f2f5; }");
+    let _ = html.push_str(".container { max-width: 900px; margin: auto; background: white; padding: 25px; border-radius: 10px; box-shadow: 0 2px 15px rgba(0,0,0,0.1); }");
+    let _ = html.push_str("h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 15px; }");
+    let _ = html.push_str("input[type='text'] { width: 350px; padding: 12px; font-size: 16px; border: 2px solid #ddd; border-radius: 6px; margin-right: 10px; }");
+    let _ = html.push_str("button { padding: 12px 25px; font-size: 16px; background: linear-gradient(135deg, #3498db, #2980b9); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }");
+    let _ = html.push_str("button:hover { background: linear-gradient(135deg, #2980b9, #1c5a7d); transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.1); }");
+    let _ = html.push_str("pre { background: #2c3e50; color: #ecf0f1; padding: 20px; border-radius: 8px; overflow: auto; white-space: pre-wrap; font-family: 'Courier New', monospace; font-size: 14px; line-height: 1.4; border-left: 5px solid #3498db; }");
+    let _ = html.push_str(".info-box { background: #e8f4fd; border-left: 5px solid #3498db; padding: 15px; margin: 20px 0; border-radius: 5px; }");
+    let _ = html.push_str(".success { color: #2ecc71; font-weight: bold; }");
+    let _ = html.push_str(".error { color: #e74c3c; font-weight: bold; }");
+    let _ = html.push_str(".cmd-example { background: #f8f9fa; padding: 10px; border-radius: 5px; margin: 10px 0; font-family: monospace; }");
     let _ = html.push_str("</style>");
+    
+    // JavaScript用于立即刷新页面
+    if immediate_refresh {
+        let _ = html.push_str("<script>");
+        let _ = html.push_str("window.onload = function() {");
+        let _ = html.push_str("  // 立即刷新页面以显示结果");
+        let _ = html.push_str("  setTimeout(function() { location.reload(); }, 800);");
+        let _ = html.push_str("};");
+        let _ = html.push_str("</script>");
+    }
+    
     let _ = html.push_str("</head><body>");
     
     let _ = html.push_str("<div class='container'>");
-    let _ = html.push_str("<h1>EC800K AT Command Tester</h1>");
-    let _ = html.push_str("<p><strong>WiFi:</strong> ");
+    let _ = html.push_str("<h1>📡 EC800K AT Command Tester</h1>");
+    
+    let _ = html.push_str("<div class='info-box'>");
+    let _ = html.push_str("<strong>ℹ️ Connection Info:</strong><br>");
+    let _ = html.push_str("WiFi: <strong>");
     let _ = html.push_str(WIFI_SSID);
-    let _ = html.push_str(" | <strong>Password:</strong> ");
+    let _ = html.push_str("</strong> | Password: <strong>");
     let _ = html.push_str(WIFI_PASSWORD);
-    let _ = html.push_str(" | <strong>IP:</strong> 192.168.4.1</p>");
+    let _ = html.push_str("</strong> | IP: <strong>192.168.4.1</strong><br>");
+    let _ = html.push_str("UART: Pico GP12(TX) → EC800K RX | Pico GP13(RX) ← EC800K TX<br>");
+    let _ = html.push_str("Baudrate: <strong>921600</strong> (tested working in CircuitPython)");
+    let _ = html.push_str("</div>");
     
-    let _ = html.push_str("<h3>Quick Commands:</h3>");
-    let _ = html.push_str("<p>");
-    let _ = html.push_str("<a class='btn' href='/at?cmd=AT'>AT</a> ");
-    let _ = html.push_str("<a class='btn' href='/at?cmd=AT+CSQ'>AT+CSQ</a> ");
-    let _ = html.push_str("<a class='btn' href='/at?cmd=AT+CREG%3F'>AT+CREG?</a> ");
-    let _ = html.push_str("<a class='btn' href='/at?cmd=AT+CGMI'>AT+CGMI</a> ");
-    let _ = html.push_str("<a class='btn' href='/at?cmd=AT+CGMM'>AT+CGMM</a> ");
-    let _ = html.push_str("</p>");
-    
-    let _ = html.push_str("<h3>Custom Command:</h3>");
+    let _ = html.push_str("<h3>📝 Send AT Command</h3>");
     let _ = html.push_str("<form action='/at' method='get'>");
     let _ = html.push_str("<input type='text' name='cmd' value='AT' placeholder='Enter AT command'>");
-    let _ = html.push_str("<button type='submit'>Send AT Command</button>");
+    let _ = html.push_str("<button type='submit'>🚀 Send Command</button>");
     let _ = html.push_str("</form>");
     
-    let _ = html.push_str("<h3>Result:</h3>");
+    let _ = html.push_str("<h3>💡 Example Commands</h3>");
+    let _ = html.push_str("<div class='cmd-example'>AT+CGMI</div>");
+    let _ = html.push_str("<div class='cmd-example'>AT+CSQ</div>");
+    let _ = html.push_str("<div class='cmd-example'>AT+CREG?</div>");
+    
+    let _ = html.push_str("<h3>🌐 HTTP via LTE (Advanced)</h3>");
+    let _ = html.push_str("<div class='cmd-example'>AT+HTTPGET=\"http://httpbin.org/get\"</div>");
+    let _ = html.push_str("<small>Note: Your EC800K might not support HTTP AT commands directly. Use TCP method below.</small>");
+    
+    let _ = html.push_str("<h3>📊 Test Results:</h3>");
     let _ = html.push_str("<pre>");
     let _ = html.push_str(result);
     let _ = html.push_str("</pre>");
     
-    let _ = html.push_str("<h3>Connection Info:</h3>");
-    let _ = html.push_str("<ul>");
-    let _ = html.push_str("<li>Pico GP12 (TX) → EC800K RX</li>");
-    let _ = html.push_str("<li>Pico GP13 (RX) ← EC800K TX</li>");
-    let _ = html.push_str("<li>Baudrate: 921600 (verified working in CircuitPython)</li>");
-    let _ = html.push_str("<li>Page auto-refreshes every 3 seconds</li>");
-    let _ = html.push_str("</ul>");
+    if immediate_refresh {
+        let _ = html.push_str("<p class='success'>🔄 Page will refresh in 1 second to show results...</p>");
+    } else {
+        let _ = html.push_str("<p><em>Page auto-refreshes every 5 seconds</em></p>");
+    }
     
     let _ = html.push_str("</div></body></html>");
     
     html
 }
 
-fn decode_url(input: &str) -> heapless::String<32> {
+fn decode_url(input: &str) -> heapless::String<64> {
     let mut output = heapless::String::new();
     let mut chars = input.chars();
     
@@ -226,9 +251,9 @@ fn decode_url(input: &str) -> heapless::String<32> {
 async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
     info!("UART task started (921600 baud)");
     
-    // 初始测试 - 发送一个AT命令检查连接
+    // 初始测试
     {
-        info!("Sending initial AT command to test connection...");
+        info!("Sending initial AT command...");
         let test_cmd = b"AT\r\n";
         if let Err(e) = tx.write_all(test_cmd).await {
             error!("Failed to send initial AT command: {:?}", e);
@@ -236,7 +261,6 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
             info!("Initial AT command sent");
             tx.flush().await.ok();
             
-            // 等待响应
             Timer::after(Duration::from_millis(200)).await;
             
             let mut buf = [0u8; 256];
@@ -253,7 +277,7 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                             result.clear();
                             let _ = result.push_str("✅ Initial test successful!\n");
                             let _ = result.push_str("EC800K is responding to AT commands.\n\n");
-                            let _ = result.push_str("Response: ");
+                            let _ = result.push_str("Response:\n");
                             let _ = result.push_str(s);
                             break;
                         }
@@ -267,10 +291,6 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                 let mut result = AT_RESULT.lock().await;
                 result.clear();
                 let _ = result.push_str("⚠️ Initial test: No response from EC800K\n");
-                let _ = result.push_str("But you said it works in CircuitPython...\n");
-                let _ = result.push_str("Check if wiring is correct:\n");
-                let _ = result.push_str("- Pico GP12 → EC800K RX\n");
-                let _ = result.push_str("- Pico GP13 ← EC800K TX\n");
             }
         }
     }
@@ -285,9 +305,9 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
         {
             let mut result = AT_RESULT.lock().await;
             result.clear();
-            let _ = result.push_str("Sending: ");
+            let _ = result.push_str("🔄 Sending command:\n");
             let _ = result.push_str(cmd.trim());
-            let _ = result.push_str("\n\nWaiting for response...\n");
+            let _ = result.push_str("\n\n⏳ Waiting for response...\n");
         }
         
         // 发送AT命令
@@ -301,12 +321,11 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                 Timer::after(Duration::from_millis(200)).await;
                 
                 // 读取响应
-                let mut response = heapless::String::<512>::new();
+                let mut response = heapless::String::<1024>::new();
                 let mut received = false;
                 let mut total_bytes = 0;
                 
-                // 尝试读取多次，因为响应可能分多次到达
-                for attempt in 0..10 {
+                for attempt in 0..15 {
                     let mut buf = [0u8; 256];
                     match rx.read(&mut buf).await {
                         Ok(n) if n > 0 => {
@@ -316,8 +335,7 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                                 info!("Response chunk {}: {}", attempt + 1, s);
                                 let _ = response.push_str(s);
                                 
-                                // 如果收到OK或ERROR，可以提前结束
-                                if s.contains("OK") || s.contains("ERROR") {
+                                if s.contains("OK") || s.contains("ERROR") || s.contains("+HTTPGET") {
                                     break;
                                 }
                             }
@@ -325,8 +343,7 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                         _ => {}
                     }
                     
-                    // 如果已经收到一些数据但还没结束，继续等待
-                    Timer::after(Duration::from_millis(50)).await;
+                    Timer::after(Duration::from_millis(100)).await;
                 }
                 
                 // 更新结果
@@ -335,12 +352,10 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                     result.clear();
                     
                     if received {
-                        let _ = result.push_str("Command: ");
+                        let _ = result.push_str("📤 Command sent:\n");
                         let _ = result.push_str(cmd.trim());
-                        let _ = result.push_str("\n\nResponse (");
-                        // 添加字节数显示
+                        let _ = result.push_str("\n\n📥 Response (");
                         let mut bytes_str = heapless::String::<10>::new();
-                        // 修复：将 total_bytes (usize) 转换为 u32
                         let _ = write_u32(&mut bytes_str, total_bytes as u32);
                         let _ = result.push_str(bytes_str.as_str());
                         let _ = result.push_str(" bytes):\n");
@@ -354,13 +369,9 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                             let _ = result.push_str("\n\n⚠️ Empty response");
                         }
                     } else {
-                        let _ = result.push_str("Command: ");
+                        let _ = result.push_str("📤 Command sent:\n");
                         let _ = result.push_str(cmd.trim());
                         let _ = result.push_str("\n\n❌ No response received\n");
-                        let _ = result.push_str("Possible issues:\n");
-                        let _ = result.push_str("1. Check UART wiring (GP12→RX, GP13←TX)\n");
-                        let _ = result.push_str("2. EC800K might be busy or not powered\n");
-                        let _ = result.push_str("3. Try resetting the EC800K module\n");
                     }
                 }
             }
@@ -369,9 +380,6 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                 let mut result = AT_RESULT.lock().await;
                 result.clear();
                 let _ = result.push_str("❌ Failed to send AT command\n");
-                let _ = result.push_str("Error: ");
-                // 这里需要将错误转换为字符串，简单处理
-                let _ = result.push_str("UART write error");
             }
         }
         
@@ -379,7 +387,6 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
     }
 }
 
-// 辅助函数：将u32写入字符串
 fn write_u32(s: &mut heapless::String<10>, n: u32) -> Result<(), ()> {
     let mut buffer = heapless::Vec::<u8, 10>::new();
     let mut n = n;
@@ -406,12 +413,10 @@ fn write_u32(s: &mut heapless::String<10>, n: u32) -> Result<(), ()> {
 async fn main(spawner: Spawner) {
     info!("=========================================");
     info!("EC800K AT Tester Starting...");
-    info!("Tested working at 921600 baud in CircuitPython");
     info!("=========================================");
     
     let p = embassy_rp::init(Default::default());
 
-    // 初始化WiFi
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
 
@@ -438,7 +443,6 @@ async fn main(spawner: Spawner) {
     control.init(clm).await;
     control.set_power_management(cyw43::PowerManagementMode::Performance).await;
 
-    // 初始化UART (921600 baud)
     static UART_TX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
     static UART_RX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
     let uart_tx_buf = UART_TX_BUF.init([0u8; 2048]);
@@ -446,17 +450,13 @@ async fn main(spawner: Spawner) {
 
     let mut uart_config = UartConfig::default();
     uart_config.baudrate = 921600;
-    // 确保使用正确的数据位、停止位等
-    uart_config.data_bits = embassy_rp::uart::DataBits::DataBits8;
-    uart_config.stop_bits = embassy_rp::uart::StopBits::STOP1;
-    uart_config.parity = embassy_rp::uart::Parity::ParityNone;
 
     info!("Configuring UART at 921600 baud...");
     
     let uart = BufferedUart::new(
         p.UART0,
-        p.PIN_12,  // TX -> EC800K RX
-        p.PIN_13,  // RX <- EC800K TX
+        p.PIN_12,
+        p.PIN_13,
         Irqs,
         uart_tx_buf,
         uart_rx_buf,
@@ -466,7 +466,6 @@ async fn main(spawner: Spawner) {
     let (uart_tx, uart_rx) = uart.split();
     spawner.spawn(uart_task(uart_tx, uart_rx).expect("Failed to spawn uart task"));
 
-    // 配置网络 (AP模式)
     let config = Config::ipv4_static(embassy_net::StaticConfigV4 {
         address: embassy_net::Ipv4Cidr::new(embassy_net::Ipv4Address::new(192, 168, 4, 1), 24),
         gateway: Some(embassy_net::Ipv4Address::new(192, 168, 4, 1)),
@@ -487,28 +486,22 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(net_task(runner).expect("Failed to spawn net task"));
 
-    // 启动WiFi AP
     info!("Starting WiFi AP: {}", WIFI_SSID);
     control.start_ap_wpa2(WIFI_SSID, WIFI_PASSWORD, 5).await;
     info!("AP started!");
 
-    // 等待网络就绪
     Timer::after(Duration::from_secs(2)).await;
 
-    // 启动HTTP服务器
     spawner.spawn(http_server_task(stack).expect("Failed to spawn HTTP server"));
     info!("HTTP server started on port 80");
 
     info!("=========================================");
-    info!("EC800K AT Tester Ready!");
+    info!("✅ EC800K AT Tester Ready!");
     info!("Connect to WiFi: {}", WIFI_SSID);
     info!("Password: {}", WIFI_PASSWORD);
     info!("Visit: http://192.168.4.1");
-    info!("UART: GP12→EC800K_RX, GP13←EC800K_TX");
-    info!("Baudrate: 921600");
     info!("=========================================");
 
-    // 主循环 - LED闪烁
     let mut counter = 0;
     loop {
         control.gpio_set(0, true).await;
