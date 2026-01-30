@@ -462,7 +462,7 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
         let mut data = EC800K_DATA.lock().await;
         let _ = data.push_str("=== EC800K LTE Modem ===\n");
         let _ = data.push_str("Pins: GP12(TX)→EC800K_RX, GP13(RX)←EC800K_TX\n");
-        let _ = data.push_str("Baud: 115200 (default)\n");
+        let _ = data.push_str("Baud: 921600 (default)\n");
         let _ = data.push_str("Waiting for modem...\n");
     }
     
@@ -804,7 +804,7 @@ async fn main(spawner: Spawner) {
     let uart_rx_buf = UART_RX_BUF.init([0u8; 2048]);
 
     let mut uart_config = UartConfig::default();
-    uart_config.baudrate = 115200;
+    uart_config.baudrate = 921600;
 
     let uart = BufferedUart::new(
         p.UART0,
