@@ -613,6 +613,8 @@ async fn test_modem_connection(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx)
     
     Timer::after(Duration::from_millis(500)).await;
     
+    // 修复：添加buf变量声明
+    let mut buf = [0u8; 256];
     let mut at_response = heapless::String::<256>::new();
     match rx.read(&mut buf).await {
         Ok(n) if n > 0 => {
