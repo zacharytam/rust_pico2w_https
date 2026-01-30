@@ -413,9 +413,9 @@ async fn main(spawner: Spawner) {
     info!("EC800K AT Tester Ready!");
     info!("Connect to: {}", WIFI_SSID);
     info!("Password: {}", WIFI_PASSWORD);
-    info("Visit: http://192.168.4.1");
-    info("UART: GP12→EC800K_RX, GP13←EC800K_TX");
-    info("Baudrate: 921600");
+    info!("Visit: http://192.168.4.1");
+    info!("UART: GP12→EC800K_RX, GP13←EC800K_TX");
+    info!("Baudrate: 921600");
     info!("====================================");
 
     // LED闪烁指示系统运行
