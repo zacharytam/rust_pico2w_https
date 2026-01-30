@@ -18,7 +18,6 @@ use embedded_io_async::Read;
 use embedded_io_async::Write;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
-use core::fmt::Write;
 
 // Program metadata
 #[unsafe(link_section = ".bi_entries")]
@@ -686,7 +685,7 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
 async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: &str, description: &str, step: u8, total_steps: u8) -> bool {
     {
         let mut result = AT_RESULT.lock().await;
-        write!(&mut *result, "\nStep {}/{}: {}...\n", step, total_steps, description).unwrap();
+        let _ = write_to_string(&mut *result, step, total_steps, description, "\nStep {}/{}: {}...\n");
     }
     
     match tx.write_all(cmd.as_bytes()).await {
@@ -720,7 +719,7 @@ async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: 
                             } else if s.contains("ERROR") {
                                 {
                                     let mut result = AT_RESULT.lock().await;
-                                    write!(&mut *result, "\n❌ {} failed\n", description).unwrap();
+                                    let _ = write_to_string(&mut *result, 0, 0, description, "\n❌ {} failed\n");
                                 }
                                 return false;
                             }
@@ -734,7 +733,7 @@ async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: 
             if !received {
                 {
                     let mut result = AT_RESULT.lock().await;
-                    write!(&mut *result, "\n⚠️ No response for {}\n", description).unwrap();
+                    let _ = write_to_string(&mut *result, 0, 0, description, "\n⚠️ No response for {}\n");
                 }
             }
             
@@ -743,9 +742,51 @@ async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: 
         Err(e) => {
             error!("Failed to send {} command: {:?}", description, e);
             let mut result = AT_RESULT.lock().await;
-            write!(&mut *result, "\n❌ Failed to send {} command\n", description).unwrap();
+            let _ = write_to_string(&mut *result, 0, 0, description, "\n❌ Failed to send {} command\n");
             false
         }
+    }
+}
+
+fn write_to_string(string: &mut heapless::String<2048>, step: u8, total_steps: u8, description: &str, format_str: &str) {
+    // 手动格式化字符串
+    if format_str.contains("Step") {
+        // 格式化 "Step {}/{}: {}...\n"
+        let _ = string.push_str("\nStep ");
+        let _ = push_u8(string, step);
+        let _ = string.push_str("/");
+        let _ = push_u8(string, total_steps);
+        let _ = string.push_str(": ");
+        let _ = string.push_str(description);
+        let _ = string.push_str("...\n");
+    } else if format_str.contains("failed") {
+        // 格式化 "\n❌ {} failed\n"
+        let _ = string.push_str("\n❌ ");
+        let _ = string.push_str(description);
+        let _ = string.push_str(" failed\n");
+    } else if format_str.contains("No response") {
+        // 格式化 "\n⚠️ No response for {}\n"
+        let _ = string.push_str("\n⚠️ No response for ");
+        let _ = string.push_str(description);
+        let _ = string.push_str("\n");
+    } else if format_str.contains("Failed to send") {
+        // 格式化 "\n❌ Failed to send {} command\n"
+        let _ = string.push_str("\n❌ Failed to send ");
+        let _ = string.push_str(description);
+        let _ = string.push_str(" command\n");
+    }
+}
+
+fn push_u8(string: &mut heapless::String<2048>, value: u8) {
+    if value >= 100 {
+        let _ = string.push((b'0' + value / 100) as char);
+        let _ = string.push((b'0' + (value / 10) % 10) as char);
+        let _ = string.push((b'0' + value % 10) as char);
+    } else if value >= 10 {
+        let _ = string.push((b'0' + value / 10) as char);
+        let _ = string.push((b'0' + value % 10) as char);
+    } else {
+        let _ = string.push((b'0' + value) as char);
     }
 }
 
