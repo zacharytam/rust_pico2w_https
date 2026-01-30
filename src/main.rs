@@ -500,32 +500,30 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
     
     // Main loop
     loop {
-        // Check for triggers
-        embassy_futures::select::select(
-            HTTP_REQUEST_TRIGGER.wait(),
-            AT_TEST_TRIGGER.wait()
-        ).await;
+        use embassy_futures::select::{select, Either};
         
-        // Check which trigger was activated
-        let http_triggered = HTTP_REQUEST_TRIGGER.signaled();
-        let mut at_command = heapless::String::<64>::new();
-        
-        if http_triggered {
-            // Clear the signal
-            let _ = HTTP_REQUEST_TRIGGER.try_wait();
-            info!("HTTP test triggered!");
-            run_http_test(&mut tx, &mut rx).await;
-        } else {
-            // Try to get AT command
-            if let Some(cmd) = AT_TEST_TRIGGER.try_wait() {
-                at_command.push_str(cmd.as_str()).ok();
-                info!("AT command triggered: {}", at_command);
-                run_at_test(&mut tx, &mut rx, at_command.as_str()).await;
+        // Wait for either trigger with timeout
+        match select(
+            select(HTTP_REQUEST_TRIGGER.wait(), AT_TEST_TRIGGER.wait()),
+            Timer::after(Duration::from_millis(100))
+        ).await {
+            Either::First(trigger_result) => {
+                match trigger_result {
+                    Either::First(_) => {
+                        info!("HTTP test triggered!");
+                        run_http_test(&mut tx, &mut rx).await;
+                    }
+                    Either::Second(cmd) => {
+                        info!("AT command triggered: {}", cmd);
+                        run_at_test(&mut tx, &mut rx, cmd.as_str()).await;
+                    }
+                }
+            }
+            Either::Second(_) => {
+                // Timeout, just check for incoming data
+                check_for_incoming_data(&mut rx).await;
             }
         }
-        
-        // Check for incoming data
-        check_for_incoming_data(&mut rx).await;
         
         Timer::after(Duration::from_millis(10)).await;
     }
