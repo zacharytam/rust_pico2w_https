@@ -18,6 +18,7 @@ use embedded_io_async::Read;
 use embedded_io_async::Write;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
+use core::fmt::Write;
 
 // Program metadata
 #[unsafe(link_section = ".bi_entries")]
@@ -685,7 +686,7 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
 async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: &str, description: &str, step: u8, total_steps: u8) -> bool {
     {
         let mut result = AT_RESULT.lock().await;
-        let _ = result.push_str(&format!("\nStep {}/{}: {}...\n", step, total_steps, description));
+        write!(&mut *result, "\nStep {}/{}: {}...\n", step, total_steps, description).unwrap();
     }
     
     match tx.write_all(cmd.as_bytes()).await {
@@ -719,7 +720,7 @@ async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: 
                             } else if s.contains("ERROR") {
                                 {
                                     let mut result = AT_RESULT.lock().await;
-                                    let _ = result.push_str(&format!("\n❌ {} failed\n", description));
+                                    write!(&mut *result, "\n❌ {} failed\n", description).unwrap();
                                 }
                                 return false;
                             }
@@ -733,7 +734,7 @@ async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: 
             if !received {
                 {
                     let mut result = AT_RESULT.lock().await;
-                    let _ = result.push_str(&format!("\n⚠️ No response for {}\n", description));
+                    write!(&mut *result, "\n⚠️ No response for {}\n", description).unwrap();
                 }
             }
             
@@ -742,7 +743,7 @@ async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: 
         Err(e) => {
             error!("Failed to send {} command: {:?}", description, e);
             let mut result = AT_RESULT.lock().await;
-            let _ = result.push_str(&format!("\n❌ Failed to send {} command\n", description));
+            write!(&mut *result, "\n❌ Failed to send {} command\n", description).unwrap();
             false
         }
     }
