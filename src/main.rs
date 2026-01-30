@@ -340,7 +340,8 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
                         let _ = result.push_str("\n\nResponse (");
                         // 添加字节数显示
                         let mut bytes_str = heapless::String::<10>::new();
-                        let _ = write_u32(&mut bytes_str, total_bytes);
+                        // 修复：将 total_bytes (usize) 转换为 u32
+                        let _ = write_u32(&mut bytes_str, total_bytes as u32);
                         let _ = result.push_str(bytes_str.as_str());
                         let _ = result.push_str(" bytes):\n");
                         let _ = result.push_str(&response);
