@@ -231,12 +231,11 @@ fn format_response(result: &str, immediate_refresh: bool) -> heapless::String<40
     let _ = html.push_str("<div class='step'>2. AT+CREG?</div>");
     let _ = html.push_str("<div class='step'>3. AT+CGATT=1</div>");
     let _ = html.push_str("<div class='step'>4. AT+QICSGP=1,1,\"CMNET\"</div>");
-    let _ = html.push_str("<div class='step'>5. AT+QIACT=1</div>");
-    let _ = html.push_str("<div class='step'>6. AT+QIACT?</div>");
-    let _ = html.push_str("<div class='step'>7. AT+QIOPEN=1,0,\"TCP\",\"httpbin.org\",80,0,0</div>");
-    let _ = html.push_str("<div class='step'>8. AT+QISEND=0</div>");
-    let _ = html.push_str("<div class='step'>9. Send HTTP request (GET /get HTTP/1.1...)</div>");
-    let _ = html.push_str("<div class='step'>10. AT+QIRD=0 (if needed)</div>");
+    let _ = html.push_str("<div class='step'>5. AT+QIACT?</div>");
+    let _ = html.push_str("<div class='step'>6. AT+QIOPEN=1,0,\"TCP\",\"httpbin.org\",80,0,0</div>");
+    let _ = html.push_str("<div class='step'>7. AT+QISEND=0</div>");
+    let _ = html.push_str("<div class='step'>8. Send HTTP request (GET /get HTTP/1.1...)</div>");
+    let _ = html.push_str("<div class='step'>9. AT+QIRD=0 (if needed)</div>");
     
     let _ = html.push_str("<h3>📊 Results:</h3>");
     let _ = html.push_str("<pre>");
@@ -479,43 +478,38 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
         result.clear();
         let _ = result.push_str("🚀 Starting HTTP GET process...\n");
         let _ = result.push_str("This will take about 30-60 seconds.\n\n");
-        let _ = result.push_str("Step 1/10: Checking SIM status...\n");
+        let _ = result.push_str("Step 1/9: Checking SIM status...\n");
     }
     
     // 步骤1: AT+CPIN?
-    if !send_at_command(tx, rx, "AT+CPIN?\r\n", "Checking SIM status", 1, 10).await {
+    if !send_at_command(tx, rx, "AT+CPIN?\r\n", "Checking SIM status", 1, 9).await {
         return;
     }
     
     // 步骤2: AT+CREG?
-    if !send_at_command(tx, rx, "AT+CREG?\r\n", "Checking network registration", 2, 10).await {
+    if !send_at_command(tx, rx, "AT+CREG?\r\n", "Checking network registration", 2, 9).await {
         return;
     }
     
     // 步骤3: AT+CGATT=1
-    if !send_at_command(tx, rx, "AT+CGATT=1\r\n", "Attaching to network", 3, 15).await {
+    if !send_at_command(tx, rx, "AT+CGATT=1\r\n", "Attaching to network", 3, 9).await {
         return;
     }
     
     // 步骤4: AT+QICSGP=1,1,"CMNET"
-    if !send_at_command(tx, rx, "AT+QICSGP=1,1,\"CMNET\"\r\n", "Setting APN", 4, 10).await {
+    if !send_at_command(tx, rx, "AT+QICSGP=1,1,\"CMNET\"\r\n", "Setting APN", 4, 9).await {
         return;
     }
     
-    // 步骤5: AT+QIACT=1
-    if !send_at_command(tx, rx, "AT+QIACT=1\r\n", "Activating PDP context", 5, 15).await {
+    // 步骤5: AT+QIACT?
+    if !send_at_command(tx, rx, "AT+QIACT?\r\n", "Checking PDP activation", 5, 9).await {
         return;
     }
     
-    // 步骤6: AT+QIACT?
-    if !send_at_command(tx, rx, "AT+QIACT?\r\n", "Checking PDP activation", 6, 10).await {
-        return;
-    }
-    
-    // 步骤7: AT+QIOPEN=1,0,"TCP","httpbin.org",80,0,0
+    // 步骤6: AT+QIOPEN=1,0,"TCP","httpbin.org",80,0,0
     {
         let mut result = AT_RESULT.lock().await;
-        let _ = result.push_str("\nStep 7/10: Opening TCP connection to httpbin.org:80...\n");
+        let _ = result.push_str("\nStep 6/9: Opening TCP connection to httpbin.org:80...\n");
     }
     
     let open_cmd = b"AT+QIOPEN=1,0,\"TCP\",\"httpbin.org\",80,0,0\r\n";
@@ -568,10 +562,10 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
         }
     }
     
-    // 步骤8: AT+QISEND=0
+    // 步骤7: AT+QISEND=0
     {
         let mut result = AT_RESULT.lock().await;
-        let _ = result.push_str("\nStep 8/10: Preparing to send HTTP request...\n");
+        let _ = result.push_str("\nStep 7/9: Preparing to send HTTP request...\n");
     }
     
     let send_cmd = b"AT+QISEND=0\r\n";
@@ -612,10 +606,10 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                 return;
             }
             
-            // 步骤9: 发送HTTP请求
+            // 步骤8: 发送HTTP请求
             {
                 let mut result = AT_RESULT.lock().await;
-                let _ = result.push_str("\nStep 9/10: Sending HTTP GET request...\n");
+                let _ = result.push_str("\nStep 8/9: Sending HTTP GET request...\n");
             }
             
             // 构建HTTP请求
@@ -644,10 +638,10 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                     // 等待响应
                     Timer::after(Duration::from_secs(5)).await;
                     
-                    // 步骤10: 读取响应
+                    // 步骤9: 读取响应
                     {
                         let mut result = AT_RESULT.lock().await;
-                        let _ = result.push_str("\nStep 10/10: Reading HTTP response...\n");
+                        let _ = result.push_str("\nStep 9/9: Reading HTTP response...\n");
                     }
                     
                     // 尝试读取数据
