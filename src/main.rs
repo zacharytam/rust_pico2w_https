@@ -226,15 +226,15 @@ fn format_response(result: &str, immediate_refresh: bool) -> heapless::String<40
     let _ = html.push_str("Click the green button above to start.");
     let _ = html.push_str("</div>");
     
-    let _ = html.push_str("<h3>🔧 HTTP GET Process (根据Quectel规范)</h3>");
+    let _ = html.push_str("<h3>🔧 HTTP GET Process (from CircuitPython)</h3>");
     let _ = html.push_str("<div class='step'>1. AT+CPIN?</div>");
     let _ = html.push_str("<div class='step'>2. AT+CREG?</div>");
     let _ = html.push_str("<div class='step'>3. AT+CGATT=1</div>");
     let _ = html.push_str("<div class='step'>4. AT+QICSGP=1,1,\"CMNET\"</div>");
     let _ = html.push_str("<div class='step'>5. AT+QIACT=1 (激活PDP)</div>");
-    let _ = html.push_str("<div class='step'>6. AT+QIOPEN=1,0,\"TCP\",\"httpbin.org\",80,0,0 (等待CONNECT)</div>");
-    let _ = html.push_str("<div class='step'>7. AT+QISEND=0,length (然后发送HTTP请求)</div>");
-    let _ = html.push_str("<div class='step'>8. 等待+QIURC: \"recv\"通知</div>");
+    let _ = html.push_str("<div class='step'>6. AT+QIOPEN=1,0,\"TCP\",\"3.223.36.72\",80,0,0</div>");
+    let _ = html.push_str("<div class='step'>7. AT+QISEND=0</div>");
+    let _ = html.push_str("<div class='step'>8. Send HTTP request (GET /get HTTP/1.1...)</div>");
     let _ = html.push_str("<div class='step'>9. AT+QIRD=0 读取数据</div>");
     
     let _ = html.push_str("<h3>📊 Results:</h3>");
@@ -584,21 +584,21 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
         }
     }
     
-    // ===== 步骤6: 打开TCP连接 (关键修正点) =====
+    // ===== 步骤6: 打开TCP连接 =====
     {
         let mut result = AT_RESULT.lock().await;
-        let _ = result.push_str("\nStep 6/9: Opening TCP connection to httpbin.org:80...\n");
-        let _ = result.push_str("Waiting for CONNECT response...\n");
+        let _ = result.push_str("\nStep 6/9: Opening TCP connection to 3.223.36.72:80...\n");
     }
     
-    let open_cmd = b"AT+QIOPEN=1,0,\"TCP\",\"httpbin.org\",80,0,0\r\n";
+    let open_cmd = b"AT+QIOPEN=1,0,\"TCP\",\"3.223.36.72\",80,0,0\r\n";
     match tx.write_all(open_cmd).await {
         Ok(_) => {
             tx.flush().await.ok();
             info!("TCP open command sent");
             
-            // 等待响应：根据Quectel规范，成功响应是"CONNECT"
-            let mut connected = false;
+            // 等待响应：先收到OK，然后等+QIOPEN: 0,0
+            let mut opened = false;
+            let mut got_ok = false;
             let mut open_response = heapless::String::<512>::new();
             
             for _ in 0..60 { // 给网络操作更长的时间
@@ -606,7 +606,7 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                 match rx.read(&mut buf).await {
                     Ok(n) if n > 0 => {
                         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                            info!("Open response chunk: {}", s);
+                            info!("Open response: {}", s);
                             let _ = open_response.push_str(s);
                             
                             {
@@ -615,12 +615,18 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                                 let _ = result.push_str(s);
                             }
                             
-                            // 关键修正：等待CONNECT响应（根据Quectel规范）
-                            if s.contains("CONNECT") || open_response.contains("CONNECT") {
-                                connected = true;
-                                info!("✅ Got CONNECT response!");
+                            // 先检查是否有OK响应
+                            if s.contains("OK") && !got_ok {
+                                got_ok = true;
+                                info!("Got OK for QIOPEN, waiting for +QIOPEN: 0,0");
+                            }
+                            
+                            // 然后等待+QIOPEN: 0,0
+                            if s.contains("+QIOPEN: 0,0") || open_response.contains("+QIOPEN: 0,0") {
+                                opened = true;
                                 break;
-                            } else if s.contains("ERROR") || open_response.contains("ERROR") {
+                            } else if s.contains("ERROR") || s.contains("+QIOPEN: 0,4") || 
+                                      open_response.contains("ERROR") || open_response.contains("+QIOPEN: 0,4") {
                                 let mut result = AT_RESULT.lock().await;
                                 let _ = result.push_str("\n❌ Failed to open TCP connection\n");
                                 return;
@@ -632,9 +638,9 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                 Timer::after(Duration::from_millis(500)).await;
             }
             
-            if !connected {
+            if !opened {
                 let mut result = AT_RESULT.lock().await;
-                let _ = result.push_str("\n❌ Timeout waiting for CONNECT response\n");
+                let _ = result.push_str("\n❌ Timeout waiting for +QIOPEN: 0,0\n");
                 let _ = result.push_str("Received so far:\n");
                 let _ = result.push_str(&open_response);
                 return;
@@ -648,24 +654,14 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
         }
     }
     
-    // ===== 步骤7: 准备发送数据 (关键修正点) =====
+    // ===== 步骤7: 准备发送数据 =====
     {
         let mut result = AT_RESULT.lock().await;
         let _ = result.push_str("\nStep 7/9: Preparing to send HTTP request...\n");
     }
     
-    // 构建HTTP请求
-    let http_request = "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nUser-Agent: EC800K\r\nAccept: */*\r\nConnection: close\r\n\r\n";
-    let request_length = http_request.len();
-    
-    // 关键修正：使用正确的格式 AT+QISEND=0,length
-    let mut send_cmd = heapless::String::<32>::new();
-    let _ = send_cmd.push_str("AT+QISEND=0,");
-    let _ = push_u32_to_string(&mut send_cmd, request_length as u32);
-    let _ = send_cmd.push_str("\r\n");
-    
-    info!("Sending send command: {}", send_cmd);
-    match tx.write_all(send_cmd.as_bytes()).await {
+    let send_cmd = b"AT+QISEND=0\r\n";
+    match tx.write_all(send_cmd).await {
         Ok(_) => {
             tx.flush().await.ok();
             info!("Send command sent, waiting for '>' prompt");
@@ -713,10 +709,21 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                 let _ = result.push_str("\nStep 8/9: Sending HTTP GET request...\n");
             }
             
+            // 构建HTTP请求
+            let http_request = "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nUser-Agent: EC800K\r\nAccept: */*\r\nConnection: close\r\n\r\n";
             let request_bytes = http_request.as_bytes();
             
             match tx.write_all(request_bytes).await {
                 Ok(_) => {
+                    // 发送Ctrl+Z (0x1A) 结束请求
+                    let ctrl_z = [0x1A];
+                    if let Err(e) = tx.write_all(&ctrl_z).await {
+                        error!("Failed to send Ctrl+Z: {:?}", e);
+                        let mut result = AT_RESULT.lock().await;
+                        let _ = result.push_str("\n❌ Failed to send Ctrl+Z\n");
+                        return;
+                    }
+                    
                     tx.flush().await.ok();
                     info!("HTTP request sent");
                     
@@ -862,27 +869,6 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
             let _ = result.push_str("\n❌ Failed to send AT+QISEND command\n");
             return;
         }
-    }
-}
-
-// 辅助函数：将u32转换为字符串
-fn push_u32_to_string(string: &mut heapless::String<32>, value: u32) {
-    if value == 0 {
-        let _ = string.push('0');
-        return;
-    }
-    
-    let mut n = value;
-    let mut digits = heapless::Vec::<u8, 10>::new();
-    
-    while n > 0 {
-        let digit = (n % 10) as u8 + b'0';
-        let _ = digits.push(digit);
-        n /= 10;
-    }
-    
-    for &digit in digits.iter().rev() {
-        let _ = string.push(digit as char);
     }
 }
 
