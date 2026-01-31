@@ -520,12 +520,15 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
             
             // 等待CONNECT OK响应
             let mut connected = false;
-            for _ in 0..30 {
+            let mut open_response = heapless::String::<512>::new();
+            
+            for _ in 0..60 {
                 let mut buf = [0u8; 256];
                 match rx.read(&mut buf).await {
                     Ok(n) if n > 0 => {
                         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                             info!("TCP response: {}", s);
+                            let _ = open_response.push_str(s);
                             
                             {
                                 let mut result = AT_RESULT.lock().await;
@@ -533,10 +536,12 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                                 let _ = result.push_str(s);
                             }
                             
-                            if s.contains("CONNECT OK") || s.contains("+QIOPEN: 0,0") {
+                            if s.contains("CONNECT OK") || open_response.contains("CONNECT OK") || 
+                               s.contains("+QIOPEN: 0,0") || open_response.contains("+QIOPEN: 0,0") {
                                 connected = true;
                                 break;
-                            } else if s.contains("ERROR") || s.contains("+QIOPEN: 0,4") {
+                            } else if s.contains("ERROR") || open_response.contains("ERROR") || 
+                                      s.contains("+QIOPEN: 0,4") || open_response.contains("+QIOPEN: 0,4") {
                                 let mut result = AT_RESULT.lock().await;
                                 let _ = result.push_str("\n❌ Failed to open TCP connection\n");
                                 return;
@@ -545,12 +550,14 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                     }
                     _ => {}
                 }
-                Timer::after(Duration::from_millis(500)).await;
+                Timer::after(Duration::from_millis(1000)).await; // 等待更长时间
             }
             
             if !connected {
                 let mut result = AT_RESULT.lock().await;
                 let _ = result.push_str("\n❌ Timeout waiting for CONNECT OK\n");
+                let _ = result.push_str("Received so far: ");
+                let _ = result.push_str(&open_response);
                 return;
             }
         }
@@ -576,12 +583,15 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
             
             // 等待'>'提示符
             let mut got_prompt = false;
-            for _ in 0..10 {
+            let mut send_response = heapless::String::<512>::new();
+            
+            for _ in 0..30 {
                 let mut buf = [0u8; 256];
                 match rx.read(&mut buf).await {
                     Ok(n) if n > 0 => {
                         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                             info!("Send response: {}", s);
+                            let _ = send_response.push_str(s);
                             
                             {
                                 let mut result = AT_RESULT.lock().await;
@@ -589,7 +599,7 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                                 let _ = result.push_str(s);
                             }
                             
-                            if s.contains(">") {
+                            if s.contains(">") || send_response.contains(">") {
                                 got_prompt = true;
                                 break;
                             }
@@ -597,12 +607,14 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                     }
                     _ => {}
                 }
-                Timer::after(Duration::from_millis(500)).await;
+                Timer::after(Duration::from_millis(1000)).await;
             }
             
             if !got_prompt {
                 let mut result = AT_RESULT.lock().await;
                 let _ = result.push_str("\n❌ Timeout waiting for '>' prompt\n");
+                let _ = result.push_str("Received so far: ");
+                let _ = result.push_str(&send_response);
                 return;
             }
             
@@ -612,8 +624,8 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                 let _ = result.push_str("\nStep 8/9: Sending HTTP GET request...\n");
             }
             
-            // 构建HTTP请求
-            let http_request = "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n";
+            // 构建HTTP请求 - 更简单的请求
+            let http_request = "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nUser-Agent: EC800K\r\nAccept: */*\r\nConnection: close\r\n\r\n";
             let request_bytes = http_request.as_bytes();
             
             match tx.write_all(request_bytes).await {
@@ -636,7 +648,7 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                     }
                     
                     // 等待响应
-                    Timer::after(Duration::from_secs(5)).await;
+                    Timer::after(Duration::from_secs(10)).await;
                     
                     // 步骤9: 读取响应
                     {
@@ -648,7 +660,8 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                     let mut full_response = heapless::String::<2048>::new();
                     let mut received_data = false;
                     
-                    for _ in 0..10 {
+                    // 首先尝试读取一些数据
+                    for _ in 0..5 {
                         let mut buf = [0u8; 512];
                         match rx.read(&mut buf).await {
                             Ok(n) if n > 0 => {
@@ -656,28 +669,44 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                                 if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                                     info!("HTTP response chunk: {}", s);
                                     let _ = full_response.push_str(s);
-                                    
-                                    // 检查是否收到了完整响应
-                                    if s.contains("\r\n\r\n") && (s.contains("{") || s.contains("</html>")) {
-                                        break;
-                                    }
-                                    
-                                    // 检查是否需要使用AT+QIRD
-                                    if s.contains("+QIURC: \"recv\"") || s.contains("+QIURC: \"rev\"") {
-                                        info!("Need to use AT+QIRD to get data");
-                                        // 发送AT+QIRD=0获取数据
-                                        if let Err(e) = tx.write_all(b"AT+QIRD=0\r\n").await {
-                                            error!("Failed to send AT+QIRD: {:?}", e);
-                                        } else {
-                                            tx.flush().await.ok();
-                                            Timer::after(Duration::from_secs(2)).await;
-                                        }
-                                    }
                                 }
                             }
                             _ => {}
                         }
                         Timer::after(Duration::from_secs(2)).await;
+                    }
+                    
+                    // 如果收到+QIURC: "recv"提示，使用AT+QIRD=0读取数据
+                    if full_response.contains("+QIURC: \"recv\"") || full_response.contains("+QIURC: \"rev\"") {
+                        info!("Need to use AT+QIRD to get data");
+                        
+                        {
+                            let mut result = AT_RESULT.lock().await;
+                            let _ = result.push_str("\nUsing AT+QIRD=0 to read data...\n");
+                        }
+                        
+                        // 发送AT+QIRD=0获取数据
+                        if let Err(e) = tx.write_all(b"AT+QIRD=0\r\n").await {
+                            error!("Failed to send AT+QIRD: {:?}", e);
+                        } else {
+                            tx.flush().await.ok();
+                            Timer::after(Duration::from_secs(3)).await;
+                            
+                            // 读取响应
+                            for _ in 0..5 {
+                                let mut buf = [0u8; 512];
+                                match rx.read(&mut buf).await {
+                                    Ok(n) if n > 0 => {
+                                        if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                                            info!("AT+QIRD response: {}", s);
+                                            let _ = full_response.push_str(s);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                Timer::after(Duration::from_secs(2)).await;
+                            }
+                        }
                     }
                     
                     // 更新最终结果
@@ -687,12 +716,13 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                         
                         if received_data {
                             let _ = result.push_str("✅ HTTP GET Process Complete!\n\n");
-                            let _ = result.push_str("=== Full HTTP Response ===\n");
+                            let _ = result.push_str("=== Full Response ===\n");
                             let _ = result.push_str(&full_response);
                         } else {
                             let _ = result.push_str("⚠️ HTTP GET Process finished\n");
                             let _ = result.push_str("No data received or timeout.\n");
-                            let _ = result.push_str("Try sending AT+QIRD=0 manually.\n");
+                            let _ = result.push_str("Response so far:\n");
+                            let _ = result.push_str(&full_response);
                         }
                     }
                 }
