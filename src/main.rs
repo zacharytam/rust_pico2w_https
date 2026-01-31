@@ -159,7 +159,6 @@ fn format_response(result: &str, immediate_refresh: bool) -> heapless::String<40
     let _ = html.push_str("<meta name='viewport' content='width=device-width, initial-scale=1'>");
     
     if !immediate_refresh {
-        // 正常页面：5秒刷新一次
         let _ = html.push_str("<meta http-equiv='refresh' content='5'>");
     }
     
@@ -182,11 +181,9 @@ fn format_response(result: &str, immediate_refresh: bool) -> heapless::String<40
     let _ = html.push_str(".warning { background: #fff3cd; border: 1px solid #ffeaa7; padding: 10px; border-radius: 5px; margin: 15px 0; }");
     let _ = html.push_str("</style>");
     
-    // JavaScript用于立即刷新页面
     if immediate_refresh {
         let _ = html.push_str("<script>");
         let _ = html.push_str("window.onload = function() {");
-        let _ = html.push_str("  // 立即刷新页面以显示结果");
         let _ = html.push_str("  setTimeout(function() { location.reload(); }, 1500);");
         let _ = html.push_str("};");
         let _ = html.push_str("</script>");
@@ -272,7 +269,6 @@ fn decode_url(input: &str) -> heapless::String<64> {
         }
     }
     
-    // 确保命令以回车换行结束
     if !output.ends_with("\r\n") {
         let _ = output.push_str("\r\n");
     }
@@ -331,16 +327,14 @@ async fn uart_task(mut tx: BufferedUartTx, mut rx: BufferedUartRx) {
     
     // 主循环
     loop {
-        // 等待信号 - 使用select等待AT命令或HTTP GET请求
+        // 等待信号
         use embassy_futures::select::{select, Either};
         
         match select(AT_COMMAND_SIGNAL.wait(), HTTP_GET_SIGNAL.wait()).await {
             Either::First(cmd) => {
-                // 普通AT命令
                 handle_at_command(&mut tx, &mut rx, cmd.as_str()).await;
             }
             Either::Second(_) => {
-                // HTTP GET请求
                 perform_http_get(&mut tx, &mut rx).await;
             }
         }
@@ -374,7 +368,6 @@ async fn handle_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, com
             let mut received = false;
             let mut total_bytes = 0;
             
-            // 尝试读取多次，因为响应可能分多次到达
             for attempt in 0..10 {
                 let mut buf = [0u8; 256];
                 match rx.read(&mut buf).await {
@@ -385,7 +378,6 @@ async fn handle_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, com
                             info!("Response chunk {}: {}", attempt + 1, s);
                             let _ = response.push_str(s);
                             
-                            // 如果收到OK或ERROR，可以提前结束
                             if s.contains("OK") || s.contains("ERROR") {
                                 break;
                             }
@@ -394,7 +386,6 @@ async fn handle_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, com
                     _ => {}
                 }
                 
-                // 如果已经收到一些数据但还没结束，继续等待
                 Timer::after(Duration::from_millis(50)).await;
             }
             
@@ -407,7 +398,6 @@ async fn handle_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, com
                     let _ = result.push_str("📤 Command:\n");
                     let _ = result.push_str(command.trim());
                     let _ = result.push_str("\n\n📥 Response (");
-                    // 添加字节数显示
                     let mut bytes_str = heapless::String::<10>::new();
                     let _ = write_u32(&mut bytes_str, total_bytes as u32);
                     let _ = result.push_str(bytes_str.as_str());
@@ -438,7 +428,6 @@ async fn handle_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, com
             result.clear();
             let _ = result.push_str("❌ Failed to send AT command\n");
             let _ = result.push_str("Error: ");
-            // 这里需要将错误转换为字符串，简单处理
             let _ = result.push_str("UART write error");
         }
     }
@@ -472,149 +461,169 @@ fn write_u32(s: &mut heapless::String<10>, n: u32) -> Result<(), ()> {
 async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
     info!("Starting HTTP GET process for httpbin.org/get");
     
-    // 更新状态
+    // 更新状态 - 快速完成
     {
         let mut result = AT_RESULT.lock().await;
         result.clear();
         let _ = result.push_str("🚀 Starting HTTP GET process...\n");
-        let _ = result.push_str("This will take about 30-60 seconds.\n\n");
-        let _ = result.push_str("Step 1/9: Checking SIM status...\n");
+        let _ = result.push_str("Using TCP/IP to 3.223.36.72:80\n\n");
     }
     
-    // 步骤1: AT+CPIN?
-    if !send_at_command(tx, rx, "AT+CPIN?\r\n", "Checking SIM status", 1, 9).await {
-        return;
-    }
+    // 步骤1-5: 基础检查
+    let basic_steps = [
+        ("AT+CPIN?\r\n", "Checking SIM status", 1),
+        ("AT+CREG?\r\n", "Checking network registration", 2),
+        ("AT+CGATT=1\r\n", "Attaching to network", 3),
+        ("AT+QICSGP=1,1,\"CMNET\"\r\n", "Setting APN", 4),
+        ("AT+QIACT=1\r\n", "Activating PDP context", 5),
+    ];
     
-    Timer::after(Duration::from_secs(1)).await;
-    
-    // 步骤2: AT+CREG?
-    if !send_at_command(tx, rx, "AT+CREG?\r\n", "Checking network registration", 2, 9).await {
-        return;
-    }
-    
-    Timer::after(Duration::from_secs(1)).await;
-    
-    // 步骤3: AT+CGATT=1
-    if !send_at_command(tx, rx, "AT+CGATT=1\r\n", "Attaching to network", 3, 9).await {
-        return;
-    }
-    
-    Timer::after(Duration::from_secs(2)).await;
-    
-    // 步骤4: AT+QICSGP=1,1,"CMNET"
-    if !send_at_command(tx, rx, "AT+QICSGP=1,1,\"CMNET\"\r\n", "Setting APN", 4, 9).await {
-        return;
-    }
-    
-    Timer::after(Duration::from_secs(1)).await;
-    
-    // ===== 步骤5: 激活PDP上下文 =====
-    {
-        let mut result = AT_RESULT.lock().await;
-        let _ = result.push_str("\nStep 5/9: Activating PDP context...\n");
-    }
-    
-    let activate_cmd = b"AT+QIACT=1\r\n";
-    match tx.write_all(activate_cmd).await {
-        Ok(_) => {
-            tx.flush().await.ok();
-            
-            // 等待响应
-            Timer::after(Duration::from_millis(500)).await;
-            
-            let mut activation_done = false;
-            
-            for _ in 0..5 {
-                let mut buf = [0u8; 256];
-                match rx.read(&mut buf).await {
-                    Ok(n) if n > 0 => {
-                        if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                            info!("QIACT=1 response: {}", s);
-                            
-                            {
-                                let mut result = AT_RESULT.lock().await;
-                                let _ = result.push_str("Response: ");
-                                let _ = result.push_str(s);
-                            }
-                            
-                            if s.contains("OK") {
-                                activation_done = true;
-                                break;
-                            } else if s.contains("ERROR") {
-                                // 可能已经激活了
-                                break;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                Timer::after(Duration::from_millis(500)).await;
-            }
-            
-            if !activation_done {
-                // 可能已经激活，检查状态
-                if !send_at_command(tx, rx, "AT+QIACT?\r\n", "Checking PDP status", 5, 9).await {
-                    let mut result = AT_RESULT.lock().await;
-                    let _ = result.push_str("\n❌ Failed to activate PDP context\n");
-                    return;
-                }
-            }
-        }
-        Err(e) => {
-            error!("Failed to send activation command: {:?}", e);
-            let mut result = AT_RESULT.lock().await;
-            let _ = result.push_str("\n❌ Failed to send activation command\n");
+    for (cmd, desc, step) in basic_steps.iter() {
+        if !send_at_command_safe(tx, rx, cmd, desc, *step, 9).await {
             return;
         }
     }
     
-    Timer::after(Duration::from_secs(2)).await;
-    
-    // ===== 步骤6: 打开TCP连接 =====
+    // 步骤6: 打开TCP连接
     {
         let mut result = AT_RESULT.lock().await;
         let _ = result.push_str("\nStep 6/9: Opening TCP connection to 3.223.36.72:80...\n");
     }
     
-    // 先检查网络状态
-    if !send_at_command(tx, rx, "AT+QISTATE\r\n", "Checking network state", 6, 9).await {
+    let open_result = open_tcp_safe(tx, rx, "3.223.36.72", 80).await;
+    if !open_result {
         return;
     }
     
-    Timer::after(Duration::from_secs(1)).await;
+    // 步骤7: 准备发送
+    {
+        let mut result = AT_RESULT.lock().await;
+        let _ = result.push_str("\nStep 7/9: Preparing to send...\n");
+    }
     
-    let open_cmd = b"AT+QIOPEN=1,0,\"TCP\",\"3.223.36.72\",80,0,0\r\n";
-    match tx.write_all(open_cmd).await {
+    let send_result = prepare_send_safe(tx, rx).await;
+    if !send_result {
+        return;
+    }
+    
+    // 步骤8: 发送HTTP请求
+    {
+        let mut result = AT_RESULT.lock().await;
+        let _ = result.push_str("\nStep 8/9: Sending HTTP request...\n");
+    }
+    
+    let http_result = send_http_safe(tx, rx).await;
+    
+    // 步骤9: 读取响应
+    {
+        let mut result = AT_RESULT.lock().await;
+        let _ = result.push_str("\nStep 9/9: Reading response...\n");
+    }
+    
+    read_response_safe(tx, rx).await;
+    
+    // 清理连接
+    let _ = tx.write_all(b"AT+QICLOSE=0\r\n").await;
+    tx.flush().await.ok();
+    Timer::after(Duration::from_millis(500)).await;
+    
+    // 最终状态
+    {
+        let mut result = AT_RESULT.lock().await;
+        let _ = result.push_str("\n\n🔚 Process completed.\n");
+    }
+}
+
+// 安全的AT命令发送
+async fn send_at_command_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, 
+                             cmd: &str, desc: &str, step: u8, total: u8) -> bool {
+    {
+        let mut result = AT_RESULT.lock().await;
+        let _ = result.push_str(&format!("\nStep {}/{}: {}...\n", step, total, desc));
+    }
+    
+    match tx.write_all(cmd.as_bytes()).await {
         Ok(_) => {
             tx.flush().await.ok();
-            info!("TCP open command sent");
+            Timer::after(Duration::from_millis(300)).await;
             
-            // 等待响应
-            let mut opened = false;
-            let mut response = heapless::String::<512>::new();
+            let mut got_ok = false;
+            let mut got_error = false;
             
-            for _ in 0..20 {
-                let mut buf = [0u8; 256];
+            for _ in 0..6 {
+                let mut buf = [0u8; 128];
                 match rx.read(&mut buf).await {
                     Ok(n) if n > 0 => {
                         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                            info!("Open response: {}", s);
-                            let _ = response.push_str(s);
-                            
                             {
                                 let mut result = AT_RESULT.lock().await;
-                                let _ = result.push_str("Response: ");
-                                let _ = result.push_str(s);
+                                let _ = result.push_str(&format!("  → {}\n", s.trim()));
                             }
                             
-                            if s.contains("+QIOPEN: 0,0") || response.contains("+QIOPEN: 0,0") || s.contains("CONNECT") {
-                                opened = true;
-                                break;
-                            } else if s.contains("ERROR") || s.contains("+QIOPEN: 0,4") {
+                            if s.contains("OK") {
+                                got_ok = true;
+                            }
+                            if s.contains("ERROR") {
+                                got_error = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                Timer::after(Duration::from_millis(200)).await;
+                
+                if got_ok || got_error {
+                    break;
+                }
+            }
+            
+            if got_error {
+                {
+                    let mut result = AT_RESULT.lock().await;
+                    let _ = result.push_str(&format!("\n❌ {} failed\n", desc));
+                }
+                return false;
+            }
+            
+            true
+        }
+        Err(_) => {
+            {
+                let mut result = AT_RESULT.lock().await;
+                let _ = result.push_str(&format!("\n❌ Failed to send {} command\n", desc));
+            }
+            false
+        }
+    }
+}
+
+// 安全的TCP连接打开
+async fn open_tcp_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, 
+                      ip: &str, port: u16) -> bool {
+    let cmd = format!("AT+QIOPEN=1,0,\"TCP\",\"{}\",{},0,0\r\n", ip, port);
+    
+    match tx.write_all(cmd.as_bytes()).await {
+        Ok(_) => {
+            tx.flush().await.ok();
+            
+            let mut connected = false;
+            
+            for _ in 0..20 {
+                let mut buf = [0u8; 128];
+                match rx.read(&mut buf).await {
+                    Ok(n) if n > 0 => {
+                        if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                            {
                                 let mut result = AT_RESULT.lock().await;
-                                let _ = result.push_str("\n❌ Failed to open TCP connection\n");
-                                return;
+                                let _ = result.push_str(&format!("  → {}\n", s.trim()));
+                            }
+                            
+                            if s.contains("CONNECT") || s.contains("+QIOPEN: 0,0") || s.contains("OK") {
+                                connected = true;
+                                break;
+                            }
+                            if s.contains("ERROR") || s.contains("+QIOPEN: 0,4") {
+                                break;
                             }
                         }
                     }
@@ -623,48 +632,42 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
                 Timer::after(Duration::from_millis(500)).await;
             }
             
-            if !opened {
-                let mut result = AT_RESULT.lock().await;
-                let _ = result.push_str("\n❌ Timeout waiting for TCP connection\n");
-                return;
+            if !connected {
+                {
+                    let mut result = AT_RESULT.lock().await;
+                    let _ = result.push_str("\n❌ TCP connection failed\n");
+                }
+                return false;
             }
+            
+            true
         }
-        Err(e) => {
-            error!("Failed to send TCP open command: {:?}", e);
-            let mut result = AT_RESULT.lock().await;
-            let _ = result.push_str("\n❌ Failed to send TCP open command\n");
-            return;
+        Err(_) => {
+            {
+                let mut result = AT_RESULT.lock().await;
+                let _ = result.push_str("\n❌ Failed to send TCP command\n");
+            }
+            false
         }
     }
-    
-    Timer::after(Duration::from_secs(2)).await;
-    
-    // ===== 步骤7: 准备发送数据 =====
-    {
-        let mut result = AT_RESULT.lock().await;
-        let _ = result.push_str("\nStep 7/9: Preparing to send HTTP request...\n");
-    }
-    
-    let send_cmd = b"AT+QISEND=0\r\n";
-    match tx.write_all(send_cmd).await {
+}
+
+// 安全的发送准备
+async fn prepare_send_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) -> bool {
+    match tx.write_all(b"AT+QISEND=0\r\n").await {
         Ok(_) => {
             tx.flush().await.ok();
-            info!("Send command sent, waiting for '>' prompt");
             
-            // 等待'>'提示符
             let mut got_prompt = false;
             
             for _ in 0..10 {
-                let mut buf = [0u8; 256];
+                let mut buf = [0u8; 64];
                 match rx.read(&mut buf).await {
                     Ok(n) if n > 0 => {
                         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                            info!("Send response: {}", s);
-                            
                             {
                                 let mut result = AT_RESULT.lock().await;
-                                let _ = result.push_str("Response: ");
-                                let _ = result.push_str(s);
+                                let _ = result.push_str(&format!("  → {}\n", s.trim()));
                             }
                             
                             if s.contains(">") {
@@ -679,189 +682,115 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
             }
             
             if !got_prompt {
-                let mut result = AT_RESULT.lock().await;
-                let _ = result.push_str("\n❌ Timeout waiting for '>' prompt\n");
-                return;
+                {
+                    let mut result = AT_RESULT.lock().await;
+                    let _ = result.push_str("\n❌ No '>' prompt received\n");
+                }
+                return false;
             }
             
-            // ===== 步骤8: 发送HTTP请求 =====
+            true
+        }
+        Err(_) => {
             {
                 let mut result = AT_RESULT.lock().await;
-                let _ = result.push_str("\nStep 8/9: Sending HTTP GET request...\n");
+                let _ = result.push_str("\n❌ Failed to send QISEND\n");
             }
-            
-            // 构建HTTP请求
-            let http_request = "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nUser-Agent: EC800K\r\nAccept: */*\r\nConnection: close\r\n\r\n";
-            let request_bytes = http_request.as_bytes();
-            
-            match tx.write_all(request_bytes).await {
-                Ok(_) => {
-                    // 发送Ctrl+Z (0x1A) 结束请求
-                    let ctrl_z = [0x1A];
-                    if let Err(e) = tx.write_all(&ctrl_z).await {
-                        error!("Failed to send Ctrl+Z: {:?}", e);
-                        let mut result = AT_RESULT.lock().await;
-                        let _ = result.push_str("\n❌ Failed to send Ctrl+Z\n");
-                        return;
-                    }
-                    
-                    tx.flush().await.ok();
-                    info!("HTTP request sent");
-                    
-                    {
-                        let mut result = AT_RESULT.lock().await;
-                        let _ = result.push_str("HTTP request sent, waiting for response...\n");
-                    }
-                    
-                    Timer::after(Duration::from_secs(3)).await;
-                    
-                    // ===== 步骤9: 读取数据 =====
-                    {
-                        let mut result = AT_RESULT.lock().await;
-                        let _ = result.push_str("\nStep 9/9: Reading HTTP response...\n");
-                    }
-                    
-                    // 主动读取数据
-                    if let Err(e) = tx.write_all(b"AT+QIRD=0,500\r\n").await {
-                        error!("Failed to send AT+QIRD: {:?}", e);
-                    } else {
-                        tx.flush().await.ok();
-                        Timer::after(Duration::from_secs(2)).await;
-                        
-                        // 读取HTTP响应数据
-                        let mut full_response = heapless::String::<2048>::new();
-                        
-                        for _ in 0..5 {
-                            let mut buf = [0u8; 512];
-                            match rx.read(&mut buf).await {
-                                Ok(n) if n > 0 => {
-                                    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                                        info!("HTTP data: {}", s);
-                                        let _ = full_response.push_str(s);
-                                    }
-                                }
-                                _ => {}
-                            }
-                            Timer::after(Duration::from_secs(1)).await;
-                        }
-                        
-                        // 更新最终结果
-                        {
-                            let mut result = AT_RESULT.lock().await;
-                            result.clear();
-                            
-                            if !full_response.is_empty() {
-                                let _ = result.push_str("✅ HTTP GET Process Complete!\n\n");
-                                let _ = result.push_str(&full_response);
-                            } else {
-                                let _ = result.push_str("⚠️ Process finished but no HTTP data read\n");
-                                let _ = result.push_str("The connection may have succeeded but no data was returned.\n");
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to send HTTP request: {:?}", e);
-                    let mut result = AT_RESULT.lock().await;
-                    let _ = result.push_str("\n❌ Failed to send HTTP request\n");
-                    return;
-                }
-            }
-        }
-        Err(e) => {
-            error!("Failed to send AT+QISEND command: {:?}", e);
-            let mut result = AT_RESULT.lock().await;
-            let _ = result.push_str("\n❌ Failed to send AT+QISEND command\n");
-            return;
-        }
-    }
-    
-    // 清理连接
-    let _ = tx.write_all(b"AT+QICLOSE=0\r\n").await;
-    tx.flush().await.ok();
-    Timer::after(Duration::from_secs(1)).await;
-    
-    // 让系统有喘息之机
-    {
-        let mut result = AT_RESULT.lock().await;
-        if !result.contains("✅") && !result.contains("❌") && !result.contains("⚠️") {
-            let _ = result.push_str("\n\n🔄 Process completed (connection closed)\n");
+            false
         }
     }
 }
 
-async fn send_at_command(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, cmd: &str, description: &str, step: u8, total_steps: u8) -> bool {
-    {
-        let mut result = AT_RESULT.lock().await;
-        // 手动格式化字符串
-        let _ = result.push_str("\nStep ");
-        let _ = push_u8_to_string(&mut *result, step);
-        let _ = result.push_str("/");
-        let _ = push_u8_to_string(&mut *result, total_steps);
-        let _ = result.push_str(": ");
-        let _ = result.push_str(description);
-        let _ = result.push_str("...\n");
-    }
+// 安全的HTTP发送
+async fn send_http_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) -> bool {
+    let http_request = "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nUser-Agent: EC800K\r\nAccept: */*\r\nConnection: close\r\n\r\n";
     
-    match tx.write_all(cmd.as_bytes()).await {
+    match tx.write_all(http_request.as_bytes()).await {
         Ok(_) => {
+            // 发送Ctrl+Z
+            let ctrl_z = [0x1A];
+            let _ = tx.write_all(&ctrl_z).await;
             tx.flush().await.ok();
             
+            {
+                let mut result = AT_RESULT.lock().await;
+                let _ = result.push_str("  → HTTP request sent\n");
+            }
+            
             // 等待响应
-            Timer::after(Duration::from_millis(500)).await;
+            Timer::after(Duration::from_secs(2)).await;
             
-            let mut received = false;
-            
+            // 检查是否有SEND OK
+            let mut send_ok = false;
             for _ in 0..5 {
-                let mut buf = [0u8; 256];
+                let mut buf = [0u8; 128];
                 match rx.read(&mut buf).await {
                     Ok(n) if n > 0 => {
-                        received = true;
                         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                            info!("{} response: {}", description, s);
-                            
-                            {
-                                let mut result = AT_RESULT.lock().await;
-                                let _ = result.push_str("Response: ");
-                                let _ = result.push_str(s);
-                            }
-                            
-                            if s.contains("OK") {
-                                return true;
-                            } else if s.contains("ERROR") {
+                            if s.contains("SEND OK") {
+                                send_ok = true;
                                 {
                                     let mut result = AT_RESULT.lock().await;
-                                    let _ = result.push_str("\n❌ ");
-                                    let _ = result.push_str(description);
-                                    let _ = result.push_str(" failed\n");
+                                    let _ = result.push_str(&format!("  → {}\n", s.trim()));
                                 }
-                                return false;
+                                break;
                             }
                         }
                     }
                     _ => {}
                 }
-                Timer::after(Duration::from_millis(300)).await;
+                Timer::after(Duration::from_millis(500)).await;
             }
             
-            if !received {
-                {
-                    let mut result = AT_RESULT.lock().await;
-                    let _ = result.push_str("\n⚠️ No response for ");
-                    let _ = result.push_str(description);
-                    let _ = result.push_str("\n");
+            true
+        }
+        Err(_) => {
+            {
+                let mut result = AT_RESULT.lock().await;
+                let _ = result.push_str("\n❌ Failed to send HTTP request\n");
+            }
+            false
+        }
+    }
+}
+
+// 安全的响应读取
+async fn read_response_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
+    // 先等待一下，让数据到达
+    Timer::after(Duration::from_secs(3)).await;
+    
+    // 发送读取命令
+    let _ = tx.write_all(b"AT+QIRD=0,500\r\n").await;
+    tx.flush().await.ok();
+    
+    // 等待并读取
+    Timer::after(Duration::from_secs(2)).await;
+    
+    let mut response = heapless::String::<1024>::new();
+    let mut got_data = false;
+    
+    for _ in 0..5 {
+        let mut buf = [0u8; 256];
+        match rx.read(&mut buf).await {
+            Ok(n) if n > 0 => {
+                got_data = true;
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    let _ = response.push_str(s);
                 }
             }
-            
-            received
+            _ => {}
         }
-        Err(e) => {
-            error!("Failed to send {} command: {:?}", description, e);
-            let mut result = AT_RESULT.lock().await;
-            let _ = result.push_str("\n❌ Failed to send ");
-            let _ = result.push_str(description);
-            let _ = result.push_str(" command\n");
-            false
+        Timer::after(Duration::from_millis(500)).await;
+    }
+    
+    {
+        let mut result = AT_RESULT.lock().await;
+        if got_data {
+            let _ = result.push_str("\n--- HTTP Response ---\n");
+            let _ = result.push_str(&response);
+            let _ = result.push_str("\n--- End ---\n");
+        } else {
+            let _ = result.push_str("\n⚠️ No data received\n");
         }
     }
 }
@@ -928,8 +857,8 @@ async fn main(spawner: Spawner) {
     
     let uart = BufferedUart::new(
         p.UART0,
-        p.PIN_12,  // TX -> EC800K RX
-        p.PIN_13,  // RX <- EC800K TX
+        p.PIN_12,
+        p.PIN_13,
         Irqs,
         uart_tx_buf,
         uart_rx_buf,
@@ -976,9 +905,14 @@ async fn main(spawner: Spawner) {
     info!("Click the green button to fetch httpbin.org/get");
     info!("=========================================");
 
+    // 简化的主循环 - 避免阻塞
+    let mut counter = 0u32;
     loop {
-        // 使用更轻量级的心跳检测
-        Timer::after(Duration::from_secs(10)).await;
-        info!("System alive...");
+        Timer::after(Duration::from_secs(5)).await;
+        
+        counter += 1;
+        if counter % 6 == 0 {
+            info!("System alive...");
+        }
     }
 }
