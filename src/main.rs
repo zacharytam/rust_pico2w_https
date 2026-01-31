@@ -512,7 +512,7 @@ async fn perform_http_get(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
         let _ = result.push_str("\nStep 8/9: Sending HTTP request...\n");
     }
     
-    let http_result = send_http_safe(tx, rx).await;
+    let _http_result = send_http_safe(tx, rx).await;
     
     // 步骤9: 读取响应
     {
@@ -539,7 +539,17 @@ async fn send_at_command_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx,
                              cmd: &str, desc: &str, step: u8, total: u8) -> bool {
     {
         let mut result = AT_RESULT.lock().await;
-        let _ = result.push_str(&format!("\nStep {}/{}: {}...\n", step, total, desc));
+        let _ = result.push_str("\nStep ");
+        let mut step_str = heapless::String::<3>::new();
+        let _ = write_u32(&mut step_str, step as u32);
+        let _ = result.push_str(&step_str);
+        let _ = result.push_str("/");
+        let mut total_str = heapless::String::<3>::new();
+        let _ = write_u32(&mut total_str, total as u32);
+        let _ = result.push_str(&total_str);
+        let _ = result.push_str(": ");
+        let _ = result.push_str(desc);
+        let _ = result.push_str("...\n");
     }
     
     match tx.write_all(cmd.as_bytes()).await {
@@ -557,7 +567,9 @@ async fn send_at_command_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx,
                         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                             {
                                 let mut result = AT_RESULT.lock().await;
-                                let _ = result.push_str(&format!("  → {}\n", s.trim()));
+                                let _ = result.push_str("  -> ");
+                                let _ = result.push_str(s.trim());
+                                let _ = result.push_str("\n");
                             }
                             
                             if s.contains("OK") {
@@ -580,7 +592,9 @@ async fn send_at_command_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx,
             if got_error {
                 {
                     let mut result = AT_RESULT.lock().await;
-                    let _ = result.push_str(&format!("\n❌ {} failed\n", desc));
+                    let _ = result.push_str("\n❌ ");
+                    let _ = result.push_str(desc);
+                    let _ = result.push_str(" failed\n");
                 }
                 return false;
             }
@@ -590,7 +604,9 @@ async fn send_at_command_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx,
         Err(_) => {
             {
                 let mut result = AT_RESULT.lock().await;
-                let _ = result.push_str(&format!("\n❌ Failed to send {} command\n", desc));
+                let _ = result.push_str("\n❌ Failed to send ");
+                let _ = result.push_str(desc);
+                let _ = result.push_str(" command\n");
             }
             false
         }
@@ -600,7 +616,31 @@ async fn send_at_command_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx,
 // 安全的TCP连接打开
 async fn open_tcp_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx, 
                       ip: &str, port: u16) -> bool {
-    let cmd = format!("AT+QIOPEN=1,0,\"TCP\",\"{}\",{},0,0\r\n", ip, port);
+    // Build command manually without format!
+    let mut cmd = heapless::String::<64>::new();
+    let _ = cmd.push_str("AT+QIOPEN=1,0,\"TCP\",\"");
+    let _ = cmd.push_str(ip);
+    let _ = cmd.push_str("\",");
+    
+    // Convert port number to string
+    let mut port_str = heapless::String::<5>::new();
+    let mut port_temp = port;
+    if port_temp == 0 {
+        let _ = port_str.push_str("0");
+    } else {
+        let mut digits = heapless::Vec::<u8, 5>::new();
+        while port_temp > 0 {
+            let digit = (port_temp % 10) as u8 + b'0';
+            let _ = digits.push(digit);
+            port_temp /= 10;
+        }
+        for digit in digits.iter().rev() {
+            let _ = port_str.push(*digit as char);
+        }
+    }
+    
+    let _ = cmd.push_str(&port_str);
+    let _ = cmd.push_str(",0,0\r\n");
     
     match tx.write_all(cmd.as_bytes()).await {
         Ok(_) => {
@@ -615,7 +655,9 @@ async fn open_tcp_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx,
                         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                             {
                                 let mut result = AT_RESULT.lock().await;
-                                let _ = result.push_str(&format!("  → {}\n", s.trim()));
+                                let _ = result.push_str("  -> ");
+                                let _ = result.push_str(s.trim());
+                                let _ = result.push_str("\n");
                             }
                             
                             if s.contains("CONNECT") || s.contains("+QIOPEN: 0,0") || s.contains("OK") {
@@ -667,7 +709,9 @@ async fn prepare_send_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) -> 
                         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                             {
                                 let mut result = AT_RESULT.lock().await;
-                                let _ = result.push_str(&format!("  → {}\n", s.trim()));
+                                let _ = result.push_str("  -> ");
+                                let _ = result.push_str(s.trim());
+                                let _ = result.push_str("\n");
                             }
                             
                             if s.contains(">") {
@@ -714,7 +758,7 @@ async fn send_http_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) -> boo
             
             {
                 let mut result = AT_RESULT.lock().await;
-                let _ = result.push_str("  → HTTP request sent\n");
+                let _ = result.push_str("  -> HTTP request sent\n");
             }
             
             // 等待响应
@@ -731,7 +775,9 @@ async fn send_http_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) -> boo
                                 send_ok = true;
                                 {
                                     let mut result = AT_RESULT.lock().await;
-                                    let _ = result.push_str(&format!("  → {}\n", s.trim()));
+                                    let _ = result.push_str("  -> ");
+                                    let _ = result.push_str(s.trim());
+                                    let _ = result.push_str("\n");
                                 }
                                 break;
                             }
@@ -792,19 +838,6 @@ async fn read_response_safe(tx: &mut BufferedUartTx, rx: &mut BufferedUartRx) {
         } else {
             let _ = result.push_str("\n⚠️ No data received\n");
         }
-    }
-}
-
-fn push_u8_to_string(string: &mut heapless::String<2048>, value: u8) {
-    if value >= 100 {
-        let _ = string.push((b'0' + value / 100) as char);
-        let _ = string.push((b'0' + (value / 10) % 10) as char);
-        let _ = string.push((b'0' + value % 10) as char);
-    } else if value >= 10 {
-        let _ = string.push((b'0' + value / 10) as char);
-        let _ = string.push((b'0' + value % 10) as char);
-    } else {
-        let _ = string.push((b'0' + value) as char);
     }
 }
 
